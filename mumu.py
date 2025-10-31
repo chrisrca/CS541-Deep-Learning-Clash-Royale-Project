@@ -53,6 +53,8 @@ for p in open_ports:
 # Send Home Button input
 print("\nSending HOME key...")
 def send_home(serial):
+    run(f'"{ADB_PATH}" -s {serial} shell input tap 400 100')
+    time.sleep(0.5)
     run(f'"{ADB_PATH}" -s {serial} shell input keyevent KEYCODE_HOME')
     return serial
 
