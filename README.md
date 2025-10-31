@@ -1,7 +1,6 @@
 ### Basic Setup:
 1. Install python [3.9+](https://www.python.org/downloads/)
-2. Install [adb](https://developer.android.com/tools/adb) and ensure it is added to your PATH
-3. Install [mumuplayer](https://www.mumuplayer.com/) and create **n** devices
+2. Install [mumuplayer](https://www.mumuplayer.com/) and create **n** devices
 
 With MuMu devices running, run `mumu.py`. Example output:
 ```ps1
