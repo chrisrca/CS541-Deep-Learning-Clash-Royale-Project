@@ -1,8 +1,6 @@
 import subprocess, time, socket, sys
 from concurrent.futures import ThreadPoolExecutor
 
-ADB = r"C:\adb\platform-tools\adb.exe"
-
 def run(cmd: str) -> str:
     try:
         return subprocess.check_output(
@@ -16,7 +14,8 @@ def is_port_open(ip: str, port: int, timeout: float = 0.1) -> bool:
         s.settimeout(timeout)
         return s.connect_ex((ip, port)) == 0
 
-def fast_parallel_scan(start: int = 16000, end: int = 17000) -> list[int]: # MuMu typical range
+# MuMu emulators are typically between ports 16000-17000 so just check them all
+def fast_parallel_scan(start: int = 16000, end: int = 17000) -> list[int]:
     ports = list(range(start, end))
     with ThreadPoolExecutor(max_workers=32) as exe:
         results = exe.map(lambda p: (p, is_port_open("127.0.0.1", p)), ports)
@@ -24,8 +23,8 @@ def fast_parallel_scan(start: int = 16000, end: int = 17000) -> list[int]: # MuM
 
 # Restart ADB
 print("Killing & restarting ADB server...")
-run(f'"{ADB}" kill-server')
-run(f'"{ADB}" start-server')
+run(f'"adb" kill-server')
+run(f'"adb" start-server')
 time.sleep(1)
 
 print("\nDetecting MuMu ADB ports...")
@@ -42,7 +41,7 @@ print("\nConnecting...")
 mumu_serials = []
 for p in open_ports:
     ip_port = f"127.0.0.1:{p}"
-    out = run(f'"{ADB}" connect {ip_port}')
+    out = run(f'"adb" connect {ip_port}')
     print(f"   Connected to {ip_port}")
     if "connected" in out:
         mumu_serials.append(ip_port)
@@ -50,7 +49,7 @@ for p in open_ports:
 # Send Home Button input
 print("\nSending HOME key...")
 def send_home(serial):
-    run(f'"{ADB}" -s {serial} shell input keyevent KEYCODE_HOME')
+    run(f'"adb" -s {serial} shell input keyevent KEYCODE_HOME')
     return serial
 
 with ThreadPoolExecutor(max_workers=len(mumu_serials)) as exe:
