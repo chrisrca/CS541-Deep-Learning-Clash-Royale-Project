@@ -1,5 +1,6 @@
 import subprocess, time, socket, sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 def run(cmd: str) -> str:
     try:
@@ -21,10 +22,13 @@ def fast_parallel_scan(start: int = 16000, end: int = 17000) -> list[int]:
         results = exe.map(lambda p: (p, is_port_open("127.0.0.1", p)), ports)
     return [p for p, open_ in results if open_]
 
+# Path to the custom adb.exe (scrcpy/adb.exe)
+ADB_PATH = str(Path("scrcpy/adb.exe").resolve())
+
 # Restart ADB
 print("Killing & restarting ADB server...")
-run(f'"adb" kill-server')
-run(f'"adb" start-server')
+run(f'"{ADB_PATH}" kill-server')
+run(f'"{ADB_PATH}" start-server')
 time.sleep(1)
 
 print("\nDetecting MuMu ADB ports...")
@@ -41,7 +45,7 @@ print("\nConnecting...")
 mumu_serials = []
 for p in open_ports:
     ip_port = f"127.0.0.1:{p}"
-    out = run(f'"adb" connect {ip_port}')
+    out = run(f'"{ADB_PATH}" connect {ip_port}')
     print(f"   Connected to {ip_port}")
     if "connected" in out:
         mumu_serials.append(ip_port)
@@ -49,7 +53,7 @@ for p in open_ports:
 # Send Home Button input
 print("\nSending HOME key...")
 def send_home(serial):
-    run(f'"adb" -s {serial} shell input keyevent KEYCODE_HOME')
+    run(f'"{ADB_PATH}" -s {serial} shell input keyevent KEYCODE_HOME')
     return serial
 
 with ThreadPoolExecutor(max_workers=len(mumu_serials)) as exe:
