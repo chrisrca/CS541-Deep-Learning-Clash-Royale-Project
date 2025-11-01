@@ -3,10 +3,13 @@ import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional, Tuple, Any, Callable
+from typing import List, Optional, Tuple, Any, Callable, Dict
+import threading
+from collections import deque
+import cv2
+import numpy as np
 
 def _run(cmd: str) -> str:
-    """Run a shell command, return stripped stdout or error."""
     try:
         return subprocess.check_output(
             cmd, shell=True, text=True, stderr=subprocess.STDOUT
@@ -21,10 +24,15 @@ def _port_open(ip: str, port: int, timeout: float = 0.1) -> bool:
 
 class MuMuADB:
     def __init__(self, adb_path: str = "scrcpy/adb.exe",
-                 port_range: Tuple[int, int] = (16000, 17000)):
+                 port_range: Tuple[int, int] = (16000, 17000),
+                 fps: int = 60):
         self.adb = str(Path(adb_path).resolve())
         self.start_port, self.end_port = port_range
         self.connected: List[str] = [] # list of "127.0.0.1:xxxxx"
+        self.fps = fps
+        self._frame_queues: Dict[str, deque] = {}
+        self._stream_threads: Dict[str, threading.Thread] = {}
+        self._stop_events: Dict[str, threading.Event] = {}
 
     # Port scanning
     def scan_ports(self, start: Optional[int] = None,
@@ -88,46 +96,6 @@ class MuMuADB:
         self.shell(serial, f"rm {remote}")
         return out
 
-    # Note: I've read this can only go up to 3 minutes so maybe we start recording again once one is done and tack them together with ffmpeg
-    def start_recording(self,
-                        serial: str,
-                        remote_path: str,
-                        bitrate: str = "8000000",
-                        size: str = "1080x1920") -> subprocess.Popen:
-        """
-        Start `screenrecord` in the background.
-
-        Returns the Popen object so you can .kill() it later if needed.
-        """
-        cmd = [
-            self.adb, "-s", serial, "shell", "screenrecord",
-            "--bit-rate", bitrate,
-            "--size", size,
-            remote_path
-        ]
-        print(f"   [{serial}] Recording {remote_path}")
-        return subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-    def stop_recording(self, serial: str, proc: subprocess.Popen) -> None:
-        """Graceful stop via SIGINT; fallback to kill."""
-        print(f"   [{serial}] Stopping recording")
-        self.shell(serial, "pkill -INT screenrecord")
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
-    def pull_recording(self, serial: str, remote: str, local: str) -> str:
-        out = _run(f'"{self.adb}" -s {serial} pull {remote} "{local}"')
-        print(f"   [{serial}] Pulled {Path(local).name}")
-        # Cleanup
-        self.shell(serial, f"rm {remote}")
-        return out
-
     def run(
         self,
         func: Callable[..., Any],
@@ -176,3 +144,56 @@ class MuMuADB:
                     results.append(exc)
 
         return results
+
+    # Streamer
+    def _stream_worker(self, serial: str):
+        remote = "/sdcard/_tmp_stream.png"
+        interval = 1.0 / self.fps
+        stop = self._stop_events[serial]
+        queue = self._frame_queues[serial]
+
+        while not stop.is_set():
+            t0 = time.time()
+            self.shell(serial, f"screencap {remote}")
+            cmd = [self.adb, "-s", serial, "exec-out", f"cat {remote}"]
+            try:
+                raw = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+            except subprocess.CalledProcessError:
+                raw = b""
+            if raw:
+                arr = np.frombuffer(raw, np.uint8)
+                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    if len(queue) >= 2:
+                        queue.popleft()
+                    queue.append(frame)
+            self.shell(serial, f"rm {remote}")
+            elapsed = time.time() - t0
+            if elapsed < interval:
+                time.sleep(interval - elapsed)
+
+    def start_stream(self, serial: str) -> None:
+        if serial in self._stream_threads:
+            return
+        self._frame_queues[serial] = deque(maxlen=3)
+        self._stop_events[serial] = threading.Event()
+        th = threading.Thread(target=self._stream_worker, args=(serial,), daemon=True)
+        th.start()
+        self._stream_threads[serial] = th
+
+    def stop_stream(self, serial: str) -> None:
+        if serial not in self._stop_events:
+            return
+        self._stop_events[serial].set()
+        self._stream_threads[serial].join(timeout=2)
+        for k in ("_frame_queues", "_stop_events", "_stream_threads"):
+            getattr(self, k).pop(serial, None)
+
+    def get_screen(self, serial: str) -> Optional[np.ndarray]:
+        if serial not in self._frame_queues:
+            self.start_stream(serial)
+        queue = self._frame_queues[serial]
+        while True:
+            if queue:
+                return queue[-1]
+            time.sleep(0.001)

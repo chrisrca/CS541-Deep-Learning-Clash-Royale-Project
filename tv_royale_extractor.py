@@ -1,11 +1,20 @@
-from pathlib import Path
 import time
-import cv2
 import numpy as np
-import subprocess
+import cv2
+import pytesseract
+from difflib import SequenceMatcher
 from mumu_adb import MuMuADB
+from common_values import (
+    ARENA_NAME, 
+    HAMBURGER_MENU, 
+    MENU_CHECK_REGION, 
+    MENU_TARGET_COLOR,
+    OCR_CFG, 
+    TV_ROYALE_BUTTON, 
+    TV_ROYALE_RIGHT
+)
 
-mumu = MuMuADB(adb_path="scrcpy/adb.exe")
+mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=60)
 mumu.restart_adb()
 ports = mumu.scan_ports()
 serials = mumu.connect_all(ports)
@@ -14,56 +23,77 @@ def open_clash_royale(serial: str):
     res = mumu.shell(serial, "am start -n com.supercell.clashroyale/com.supercell.titan.GameApp")
     print(f"[{serial}] {res.splitlines()[0]}")
 
-def pull_screenshot_bytes(serial: str) -> bytes:
-    remote = "/sdcard/_tmp.png"
-    mumu.shell(serial, f"screencap {remote}")
-    cmd = [mumu.adb, "-s", serial, "exec-out", f"cat {remote}"]
-    try:
-        data = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        data = b""
-    mumu.shell(serial, f"rm {remote}")
-    return data
-
 def wait_for_menu(serial: str):
-    interval = 1.0 / 30
-    target_color = np.array([16, 187, 248])
-    y1, y2 = 200, 220
-    x1, x2 = 420, 440
-
     while True:
-        t0 = time.time()
-        raw = pull_screenshot_bytes(serial)
-        if not raw:
-            time.sleep(max(0, interval - (time.time() - t0)))
-            continue
-        arr = np.frombuffer(raw, np.uint8)
-        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        frame = mumu.get_screen(serial)
         if frame is None:
             continue
-
-        if frame.shape[0] > y2 and frame.shape[1] > x2:
-            roi = frame[y1:y2, x1:x2]
-            mean_color = np.mean(roi, axis=(0,1))
-            if np.all(np.abs(mean_color - target_color) <= 10):
-                print(f"[{serial}] Detected Menu Screen")
-                break
-
-        elapsed = time.time() - t0
-        if elapsed < interval:
-            time.sleep(interval - elapsed)
+        roi = frame[*MENU_CHECK_REGION]
+        mean = np.mean(roi, axis=(0, 1)).astype(np.float32)
+        if np.all(np.abs(mean - MENU_TARGET_COLOR) <= 10):
+            print(f"[{serial}] Detected Menu Screen")
+            break
 
 def open_tv_royale(serial: str):
     print(f"[{serial}] Opening TV Royale")
-    x, y = 495, 105
-    mumu.tap(serial, x, y)
+    mumu.tap(serial, *HAMBURGER_MENU)
     time.sleep(0.5)
-    x, y = 390, 210
-    mumu.tap(serial, x, y)
+    mumu.tap(serial, *TV_ROYALE_BUTTON)
+    time.sleep(1)
+
+def collect_arena_names(serial: str):
+    GOBLIN_TARGET = "GoblinStadium"
+    FUZZY_THRESHOLD = 0.75
+
+    def is_goblin_stadium(text: str) -> bool:
+        if not text:
+            return False
+        clean = ''.join(text.split())
+        return SequenceMatcher(None, clean, GOBLIN_TARGET).ratio() >= FUZZY_THRESHOLD
+
+    def preprocess_roi(roi):
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        return cv2.resize(thresh, None, fx=2, fy=2)
+
+    def get_name():
+        frame = mumu.get_screen(serial)
+        if frame is None:
+            return None
+        roi = frame[*ARENA_NAME]
+        processed = preprocess_roi(roi)
+        return pytesseract.image_to_string(processed, config=OCR_CFG).strip()
+
+    print(f"[{serial}] Searching for Arena 1...")
+
+    while True:
+        name = get_name()
+        if is_goblin_stadium(name):
+            print("Found Arena 1, starting collection...")
+            break
+        mumu.tap(serial, *TV_ROYALE_RIGHT)
+        time.sleep(1)
+
+    arena_names = []
+
+    while True:
+        mumu.tap(serial, *TV_ROYALE_RIGHT)
+        time.sleep(1)
+
+        name = get_name()
+        arena_names.append(name)
+
+        if is_goblin_stadium(name):
+            print(f"[{serial}] Total collected: {len(arena_names)}")
+            break
+
+    return arena_names
 
 def worker(serial: str):
     open_clash_royale(serial)
     wait_for_menu(serial)
     open_tv_royale(serial)
+    collect_arena_names(serial)
+    # cv2.imwrite(f"tv_royale_{serial.replace(':', '_')}.png", mumu.get_screen(serial))
 
-mumu.run(worker) 
+mumu.run(worker)
