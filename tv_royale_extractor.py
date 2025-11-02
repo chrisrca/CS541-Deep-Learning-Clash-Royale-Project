@@ -149,7 +149,7 @@ def jump_to_segment_start(serial: str):
         mumu.tap(serial, *TV_ROYALE_RIGHT)
         time.sleep(0.5)
 
-def traverse_segment(serial: str):
+def record_replays(serial: str):
     global arena_names_global
 
     total_arenas = len(arena_names_global)
@@ -176,7 +176,7 @@ def traverse_segment(serial: str):
     # Return to start
     for _ in range(moves_right):
         mumu.tap(serial, *TV_ROYALE_LEFT)
-        time.sleep(0.1)
+        time.sleep(0.5)
 
     print(f"[{serial}] Finished traverse & returned to arena #{segment_start_idx + 1}")
 
@@ -251,8 +251,9 @@ def worker(serial: str):
     open_tv_royale(serial)
     collect_arena_names(serial)
     jump_to_segment_start(serial)
-    traverse_segment(serial)
-    
+    while True:
+        record_replays(serial)
+        time.sleep(600)
     # cv2.imwrite(f"tv_royale_{serial.replace(':', '_')}.png", mumu.get_screen(serial))
 
 mumu.run(worker)
