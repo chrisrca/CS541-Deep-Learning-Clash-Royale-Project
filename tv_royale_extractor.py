@@ -3,6 +3,7 @@ import numpy as np
 import cv2
 import pytesseract
 from difflib import SequenceMatcher
+from threading import Lock
 from mumu_adb import MuMuADB
 from common_values import (
     ARENA_NAME, 
@@ -18,6 +19,11 @@ mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=60)
 mumu.restart_adb()
 ports = mumu.scan_ports()
 serials = mumu.connect_all(ports)
+
+arena_names_global = []
+collection_done = False
+collection_lock = Lock()
+first_serial = None
 
 def open_clash_royale(serial: str):
     res = mumu.shell(serial, "am start -n com.supercell.clashroyale/com.supercell.titan.GameApp")
@@ -64,36 +70,83 @@ def collect_arena_names(serial: str):
         processed = preprocess_roi(roi)
         return pytesseract.image_to_string(processed, config=OCR_CFG).strip()
 
-    print(f"[{serial}] Searching for Arena 1...")
+    global collection_done, arena_names_global, first_serial
 
+    with collection_lock:
+        if serial != first_serial:
+            print(f"[{serial}] Not collector, searching for Goblin Stadium only...")
+
+    # Search until Arena 1 then wait for collector
+    if serial != first_serial:
+        while True:
+            name = get_name()
+            if is_goblin_stadium(name):
+                print(f"[{serial}] Found Goblin Stadium, waiting for collector to finish...")
+                while not collection_done:
+                    time.sleep(0.5)
+                return arena_names_global
+            mumu.tap(serial, *TV_ROYALE_RIGHT)
+            time.sleep(1)
+
+    # Arena collector
+    print(f"[{serial}] Collector device, searching for Arena 1...")
     while True:
         name = get_name()
         if is_goblin_stadium(name):
-            print("Found Arena 1, starting collection...")
+            print(f"[{serial}] Found Arena 1, starting collection...")
             break
         mumu.tap(serial, *TV_ROYALE_RIGHT)
         time.sleep(1)
 
     arena_names = []
-
     while True:
         mumu.tap(serial, *TV_ROYALE_RIGHT)
         time.sleep(1)
-
         name = get_name()
         arena_names.append(name)
-
         if is_goblin_stadium(name):
             print(f"[{serial}] Total collected: {len(arena_names)}")
+            with collection_lock:
+                arena_names_global = arena_names
+                collection_done = True
             break
 
     return arena_names
 
+def fast_jump_to_segment_start(serial: str):
+    global arena_names_global, first_serial
+
+    # Make sure collector has finished
+    while not collection_done:
+        time.sleep(0.1)
+
+    total_arenas = len(arena_names_global)
+    arenas_per_device = (total_arenas + len(serials) - 1) // len(serials)
+    index = serials.index(serial)
+
+    # Start of this device's segment
+    target_arena_idx = index * arenas_per_device
+    if target_arena_idx >= total_arenas:
+        return
+
+    print(f"[{serial}] Jumping to arena #{target_arena_idx + 1}")
+
+    for _ in range(target_arena_idx):
+        mumu.tap(serial, *TV_ROYALE_RIGHT)
+        time.sleep(0.1)
+
 def worker(serial: str):
+    global first_serial
+    with collection_lock:
+        if first_serial is None:
+            first_serial = serial
+            print(f"[{serial}] Assigned as arena collector")
+    
     open_clash_royale(serial)
     wait_for_menu(serial)
     open_tv_royale(serial)
     collect_arena_names(serial)
+    fast_jump_to_segment_start(serial)
     # cv2.imwrite(f"tv_royale_{serial.replace(':', '_')}.png", mumu.get_screen(serial))
 
 mumu.run(worker)
