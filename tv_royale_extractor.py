@@ -11,7 +11,8 @@ from common_values import (
     MENU_CHECK_REGION, 
     MENU_TARGET_COLOR,
     OCR_CFG, 
-    TV_ROYALE_BUTTON, 
+    TV_ROYALE_BUTTON,
+    TV_ROYALE_LEFT, 
     TV_ROYALE_RIGHT
 )
 
@@ -113,7 +114,7 @@ def collect_arena_names(serial: str):
 
     return arena_names
 
-def fast_jump_to_segment_start(serial: str):
+def jump_to_segment_start(serial: str):
     global arena_names_global, first_serial
 
     # Make sure collector has finished
@@ -135,6 +136,32 @@ def fast_jump_to_segment_start(serial: str):
         mumu.tap(serial, *TV_ROYALE_RIGHT)
         time.sleep(0.1)
 
+def traverse_segment(serial: str):
+    global arena_names_global, first_serial
+
+    # Determine owned arenas
+    total_arenas = len(arena_names_global)
+    arenas_per_device = (total_arenas + len(serials) - 1) // len(serials)
+    idx = serials.index(serial)
+    segment_start_idx = idx * arenas_per_device
+    segment_end_idx = min((idx + 1) * arenas_per_device, total_arenas)
+    segment_size = segment_end_idx - segment_start_idx
+
+    print(f"[{serial}] Traversing {segment_size} arena(s): {segment_start_idx + 1} to {segment_end_idx}")
+
+    # Right from first to last in segment
+    moves_right = segment_size - 1
+    for _ in range(moves_right):
+        mumu.tap(serial, *TV_ROYALE_RIGHT)
+        time.sleep(1)
+
+    # Left to return to start
+    for _ in range(moves_right):
+        mumu.tap(serial, *TV_ROYALE_LEFT)
+        time.sleep(0.1)
+
+    print(f"[{serial}] Finished traverse & returned to arena #{segment_start_idx + 1}")
+
 def worker(serial: str):
     global first_serial
     with collection_lock:
@@ -146,7 +173,8 @@ def worker(serial: str):
     wait_for_menu(serial)
     open_tv_royale(serial)
     collect_arena_names(serial)
-    fast_jump_to_segment_start(serial)
+    jump_to_segment_start(serial)
+    traverse_segment(serial)
     # cv2.imwrite(f"tv_royale_{serial.replace(':', '_')}.png", mumu.get_screen(serial))
 
 mumu.run(worker)
