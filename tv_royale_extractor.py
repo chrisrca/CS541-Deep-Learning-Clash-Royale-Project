@@ -1,7 +1,10 @@
+import hashlib
 import time
+import uuid
 import numpy as np
 import cv2
 import pytesseract
+from pathlib import Path
 from difflib import SequenceMatcher
 from threading import Lock
 from mumu_adb import MuMuADB
@@ -27,6 +30,9 @@ from common_values import (
     WATCHED_INDICATOR_REGION,
     WATCHED_TARGET_COLOR
 )
+
+REPLAY_ROOT = Path("replays")
+REPLAY_ROOT.mkdir(exist_ok=True)
 
 mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=60)
 mumu.restart_adb()
@@ -197,6 +203,13 @@ def handle_replay(serial: str, arena_idx: int):
     if not watched(serial):
         print(f"[{serial}] Arena {arena_idx} not watched yet!")
         mumu.tap(serial, *WATCH_BUTTON)
+
+        replay_id = uuid.uuid4()
+        replay_dir = REPLAY_ROOT / f"arena_{arena_idx}" / str(replay_id)
+        replay_dir.mkdir(parents=True, exist_ok=True)
+        frame_counter = 0
+        last_frame_hash = None
+
         # Wait for replay to start
         while True:
             frame = mumu.get_screen(serial)
@@ -217,6 +230,13 @@ def handle_replay(serial: str, arena_idx: int):
                 continue
 
             # Save frames here later or throw them onto hf (this is our "recording")
+            current_hash = hashlib.md5(frame.tobytes()).hexdigest() # Ideally a clock would be better here but im tired so hash to detect frame changes
+            if last_frame_hash is None or current_hash != last_frame_hash:
+                frame_path = replay_dir / f"{frame_counter:05d}.png"
+                if frame_counter > 10: # Skip first few frames to avoid replay speed / pause controls
+                    cv2.imwrite(str(frame_path), frame)
+                frame_counter += 1
+                last_frame_hash = current_hash
 
             top = frame[*REPLAY_TOP_COLOR_REGION]
             bottom = frame[*REPLAY_BOTTOM_COLOR_REGION]
@@ -252,8 +272,15 @@ def worker(serial: str):
     collect_arena_names(serial)
     jump_to_segment_start(serial)
     while True:
+        # Main replay recording loop
         record_replays(serial)
         time.sleep(600)
+
+        # Relaunch app to make sure new replays become available (idk if this is necessary but with 6+ emulators time lost doing this doesn't really matter)
+        open_clash_royale(serial)
+        wait_for_menu(serial)
+        open_tv_royale(serial)
+
     # cv2.imwrite(f"tv_royale_{serial.replace(':', '_')}.png", mumu.get_screen(serial))
 
 mumu.run(worker)
