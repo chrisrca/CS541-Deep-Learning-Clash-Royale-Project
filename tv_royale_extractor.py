@@ -209,6 +209,7 @@ def handle_replay(serial: str, arena_idx: int):
         replay_dir.mkdir(parents=True, exist_ok=True)
         frame_counter = 0
         last_frame_hash = None
+        saved_frame_paths = []
 
         # Wait for replay to start
         while True:
@@ -232,9 +233,10 @@ def handle_replay(serial: str, arena_idx: int):
             # Save frames here later or throw them onto hf (this is our "recording")
             current_hash = hashlib.md5(frame.tobytes()).hexdigest() # Ideally a clock would be better here but im tired so hash to detect frame changes
             if last_frame_hash is None or current_hash != last_frame_hash:
-                frame_path = replay_dir / f"{frame_counter:05d}.png"
+                frame_path = replay_dir / f"{(frame_counter - 10):05d}.png"
                 if frame_counter > 10: # Skip first few frames to avoid replay speed / pause controls
                     cv2.imwrite(str(frame_path), frame)
+                    saved_frame_paths.append(frame_path)  # Track saved file
                 frame_counter += 1
                 last_frame_hash = current_hash
 
@@ -247,6 +249,15 @@ def handle_replay(serial: str, arena_idx: int):
             if np.all(np.abs(mean_button - REPLAY_OK_BUTTON_COLOR) <= 10) and not (np.all(np.abs(mean_top - REPLAY_TOP_COLOR) <= 10) and np.all(np.abs(mean_bottom - REPLAY_BOTTOM_COLOR) <= 10)):
                 print(f"[{serial}] Detected Replay End")
                 break
+
+        # Remove last 20 frames to avoid win / lose screen
+        frames_to_remove = saved_frame_paths[-20:]
+        for frame_path in frames_to_remove:
+            if frame_path.exists():
+                frame_path.unlink()
+        
+        if len(frames_to_remove) > 0:
+            print(f"[{serial}] Removed {len(frames_to_remove)} trailing frames.")
 
         mumu.tap(serial, *REPLAY_OK_BUTTON)
         while True:
