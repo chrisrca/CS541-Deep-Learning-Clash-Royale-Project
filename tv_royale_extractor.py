@@ -27,6 +27,7 @@ collection_lock = Lock()
 first_serial = None
 
 def open_clash_royale(serial: str):
+    mumu.shell(serial, "am force-stop com.supercell.clashroyale")
     res = mumu.shell(serial, "am start -n com.supercell.clashroyale/com.supercell.titan.GameApp")
     print(f"[{serial}] {res.splitlines()[0]}")
 
