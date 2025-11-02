@@ -23,5 +23,5 @@ REPLAY_OK_BUTTON_REGION = [slice(850, 895), slice(210, 336)]
 REPLAY_OK_BUTTON_COLOR = np.array([244, 178, 97], dtype=np.float32)
 REPLAY_OK_BUTTON = (272, 874)
 
-TV_ROYALE_BANNER_COLOR_REGION = [slice(150, 185), slice(90, 160)]
+TV_ROYALE_BANNER_COLOR_REGION = [slice(150, 185), slice(90, 100)]
 TV_ROYALE_BANNER_COLOR = np.array([99, 26, 232], dtype=np.float32)

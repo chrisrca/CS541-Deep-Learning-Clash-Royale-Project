@@ -147,7 +147,7 @@ def jump_to_segment_start(serial: str):
 
     for _ in range(target_arena_idx):
         mumu.tap(serial, *TV_ROYALE_RIGHT)
-        time.sleep(0.1)
+        time.sleep(0.5)
 
 def traverse_segment(serial: str):
     global arena_names_global
