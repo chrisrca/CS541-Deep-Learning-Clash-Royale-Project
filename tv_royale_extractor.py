@@ -13,7 +13,9 @@ from common_values import (
     OCR_CFG, 
     TV_ROYALE_BUTTON,
     TV_ROYALE_LEFT, 
-    TV_ROYALE_RIGHT
+    TV_ROYALE_RIGHT,
+    WATCHED_INDICATOR_REGION,
+    WATCHED_TARGET_COLOR
 )
 
 mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=60)
@@ -163,6 +165,19 @@ def traverse_segment(serial: str):
 
     print(f"[{serial}] Finished traverse & returned to arena #{segment_start_idx + 1}")
 
+def check_if_watched(serial: str):
+    frame = mumu.get_screen(serial)
+    roi = frame[*WATCHED_INDICATOR_REGION]
+
+    # Compute absolute difference
+    diff = np.abs(roi.astype(np.int16) - WATCHED_TARGET_COLOR)
+    matches = np.all(diff <= 10, axis=-1)
+
+    # Count matching pixels
+    match_count = np.sum(matches)
+
+    return match_count >= 10
+
 def worker(serial: str):
     global first_serial
     with collection_lock:
@@ -176,6 +191,9 @@ def worker(serial: str):
     collect_arena_names(serial)
     jump_to_segment_start(serial)
     traverse_segment(serial)
+
+    print(check_if_watched(serial))
+    
     # cv2.imwrite(f"tv_royale_{serial.replace(':', '_')}.png", mumu.get_screen(serial))
 
 mumu.run(worker)
