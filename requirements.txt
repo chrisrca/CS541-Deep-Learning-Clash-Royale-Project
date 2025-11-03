@@ -1,3 +1,5 @@
 opencv-python
 pytesseract 
 pillow
+huggingface_hub
+python-dotenv

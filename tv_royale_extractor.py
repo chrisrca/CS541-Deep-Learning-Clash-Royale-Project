@@ -1,9 +1,13 @@
+import os
 import hashlib
 import time
+import shutil
 import uuid
-import numpy as np
 import cv2
 import pytesseract
+import numpy as np
+from huggingface_hub import HfApi
+from dotenv import load_dotenv
 from pathlib import Path
 from difflib import SequenceMatcher
 from threading import Lock
@@ -34,10 +38,16 @@ from common_values import (
 REPLAY_ROOT = Path("replays")
 REPLAY_ROOT.mkdir(exist_ok=True)
 
-mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=60)
+mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=120) # Not sure if MuMu supports 120 fps
 mumu.restart_adb()
 ports = mumu.scan_ports()
 serials = mumu.connect_all(ports)
+
+load_dotenv()
+HF_TOKEN = os.getenv("HUGGINGFACE_ACCESS_TOKEN")
+api = HfApi(token=HF_TOKEN)
+
+REPO_ID = "chrisrca/clash-royale-tv-replays"
 
 arena_names_global = []
 collection_done = False
@@ -260,6 +270,22 @@ def handle_replay(serial: str, arena_idx: int):
             print(f"[{serial}] Removed {len(frames_to_remove)} trailing frames.")
 
         mumu.tap(serial, *REPLAY_OK_BUTTON)
+
+        try:
+            rel_path = replay_dir.relative_to(REPLAY_ROOT)
+            api.upload_folder(
+                folder_path=str(replay_dir),
+                repo_id=REPO_ID,
+                repo_type="dataset",
+                path_in_repo=str(rel_path),
+                commit_message=f"Replay arena {arena_idx} {replay_id}",
+                token=HF_TOKEN,
+            )
+            print(f"[{serial}] Uploaded {rel_path}")
+            shutil.rmtree(replay_dir)
+        except Exception as e:
+            print(f"[{serial}] Upload failed: {e}")
+
         while True:
             frame = mumu.get_screen(serial)
             if frame is None:
