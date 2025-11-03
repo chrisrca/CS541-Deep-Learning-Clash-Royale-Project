@@ -273,15 +273,18 @@ def handle_replay(serial: str, arena_idx: int):
 
         try:
             rel_path = replay_dir.relative_to(REPLAY_ROOT)
+            # Use as_posix() to ensure forward slashes
+            path_in_repo = rel_path.as_posix()
+            
             api.upload_folder(
                 folder_path=str(replay_dir),
                 repo_id=REPO_ID,
                 repo_type="dataset",
-                path_in_repo=str(rel_path),
+                path_in_repo=path_in_repo,
                 commit_message=f"Replay arena {arena_idx} {replay_id}",
                 token=HF_TOKEN,
             )
-            print(f"[{serial}] Uploaded {rel_path}")
+            print(f"[{serial}] Uploaded {path_in_repo}")
             shutil.rmtree(replay_dir)
         except Exception as e:
             print(f"[{serial}] Upload failed: {e}")
