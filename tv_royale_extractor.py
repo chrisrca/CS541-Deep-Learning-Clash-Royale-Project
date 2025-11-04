@@ -5,12 +5,13 @@ import shutil
 import uuid
 import cv2
 import pytesseract
+import queue
 import numpy as np
 from huggingface_hub import HfApi
 from dotenv import load_dotenv
 from pathlib import Path
 from difflib import SequenceMatcher
-from threading import Lock
+from threading import Lock, Thread
 from mumu_adb import MuMuADB
 from common_values import (
     ARENA_NAME, 
@@ -38,7 +39,7 @@ from common_values import (
 REPLAY_ROOT = Path("replays")
 REPLAY_ROOT.mkdir(exist_ok=True)
 
-mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=120) # Not sure if MuMu supports 120 fps
+mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=60)
 mumu.restart_adb()
 ports = mumu.scan_ports()
 serials = mumu.connect_all(ports)
@@ -53,6 +54,33 @@ arena_names_global = []
 collection_done = False
 collection_lock = Lock()
 first_serial = None
+
+upload_queue = queue.Queue()
+
+def upload_worker():
+    while True:
+        item = upload_queue.get()
+        if item is None:
+            break
+        serial, replay_dir, arena_idx, replay_id = item
+        try:
+            rel_path = replay_dir.relative_to(REPLAY_ROOT)
+            path_in_repo = rel_path.as_posix()
+            api.upload_folder(
+                folder_path=str(replay_dir),
+                repo_id=REPO_ID,
+                repo_type="dataset",
+                path_in_repo=path_in_repo,
+                commit_message=f"Replay arena {arena_idx} {replay_id}",
+                token=HF_TOKEN,
+            )
+            print(f"[{serial}] Uploaded {path_in_repo}")
+            shutil.rmtree(replay_dir)
+        except Exception as e:
+            print(f"[{serial}] Upload failed: {e}")
+
+uploader = Thread(target=upload_worker, daemon=True)
+uploader.start()
 
 def open_clash_royale(serial: str):
     mumu.shell(serial, "am force-stop com.supercell.clashroyale")
@@ -271,23 +299,7 @@ def handle_replay(serial: str, arena_idx: int):
 
         mumu.tap(serial, *REPLAY_OK_BUTTON)
 
-        try:
-            rel_path = replay_dir.relative_to(REPLAY_ROOT)
-            # Use as_posix() to ensure forward slashes
-            path_in_repo = rel_path.as_posix()
-            
-            api.upload_folder(
-                folder_path=str(replay_dir),
-                repo_id=REPO_ID,
-                repo_type="dataset",
-                path_in_repo=path_in_repo,
-                commit_message=f"Replay arena {arena_idx} {replay_id}",
-                token=HF_TOKEN,
-            )
-            print(f"[{serial}] Uploaded {path_in_repo}")
-            shutil.rmtree(replay_dir)
-        except Exception as e:
-            print(f"[{serial}] Upload failed: {e}")
+        upload_queue.put((serial, replay_dir, arena_idx, replay_id))
 
         while True:
             frame = mumu.get_screen(serial)
