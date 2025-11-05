@@ -162,7 +162,7 @@ def collect_arena_names(serial: str):
         time.sleep(1)
         name = get_name()
         arena_names.append(name)
-        if is_goblin_stadium(name):
+        if is_goblin_stadium(name) or len(arena_names) >= 31:
             print(f"[{serial}] Total collected: {len(arena_names)}")
             with collection_lock:
                 arena_names_global = arena_names
