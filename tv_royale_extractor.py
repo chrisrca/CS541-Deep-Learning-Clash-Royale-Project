@@ -6,6 +6,7 @@ import uuid
 import cv2
 import pytesseract
 import queue
+import threading
 import numpy as np
 from huggingface_hub import HfApi
 from dotenv import load_dotenv
@@ -40,7 +41,6 @@ REPLAY_ROOT = Path("replays")
 REPLAY_ROOT.mkdir(exist_ok=True)
 
 mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=60)
-mumu.restart_adb()
 ports = mumu.scan_ports()
 serials = mumu.connect_all(ports)
 
@@ -311,7 +311,7 @@ def handle_replay(serial: str, arena_idx: int):
                 print(f"[{serial}] Detected TV Royale")
                 break
 
-def worker(serial: str):
+def worker(serial: str, stop_event: threading.Event):
     global first_serial
     with collection_lock:
         if first_serial is None:
@@ -323,16 +323,35 @@ def worker(serial: str):
     open_tv_royale(serial)
     collect_arena_names(serial)
     jump_to_segment_start(serial)
-    while True:
+    while not stop_event.is_set():
         # Main replay recording loop
         record_replays(serial)
-        time.sleep(600)
-
+        if stop_event.wait(600):
+            break
         # Relaunch app to make sure new replays become available (idk if this is necessary but with 6+ emulators time lost doing this doesn't really matter)
         open_clash_royale(serial)
         wait_for_menu(serial)
         open_tv_royale(serial)
+    mumu.stop_stream(serial)
+    print(f"[{serial}] Worker stopped")
 
-    # cv2.imwrite(f"tv_royale_{serial.replace(':', '_')}.png", mumu.get_screen(serial))
-
-mumu.run(worker)
+while True:
+    mumu.restart_adb()
+    ports = mumu.scan_ports()
+    serials = mumu.connect_all(ports)
+    collection_done = False
+    arena_names_global = []
+    first_serial = None
+    stop_events = {}
+    threads = {}
+    for serial in serials:
+        stop_events[serial] = threading.Event()
+        t = threading.Thread(target=worker, args=(serial, stop_events[serial]))
+        t.start()
+        threads[serial] = t
+    time.sleep(3600)  # Restart every hour in case of crash (kind of hacky but I don't want to write logic for it)
+    for e in stop_events.values():
+        e.set()
+    for t in threads.values():
+        t.join()
+    print("Restarting all workers...")
