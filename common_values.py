@@ -10,6 +10,7 @@ TV_ROYALE_BUTTON = (390, 210)
 
 TV_ROYALE_LEFT = (46, 166)
 TV_ROYALE_RIGHT = (495, 167)
+ARENA_REGION = [slice(145, 210),slice(85, 460)]
 ARENA_NAME = [slice(150, 183), slice(65, 482)]
 WATCHED_INDICATOR_REGION = [slice(233, 255), slice(229, 303)]
 WATCHED_TARGET_COLOR = np.array([155, 252, 106], dtype=np.float32)
