@@ -304,8 +304,8 @@ def record_and_queue_replay(serial: str, arena_idx: int):
     else:
         print(f"[{serial}] RECORD TIMEOUT after {RECORD_TIMEOUT}s")
 
-    # trim last 20 frames (win/lose screen)
-    to_remove = saved_paths[-20:]
+    # trim last 8 frames (win/lose screen)
+    to_remove = saved_paths[-8:]
     for p in to_remove:
         if p.exists():
             p.unlink()
