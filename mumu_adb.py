@@ -147,31 +147,37 @@ class MuMuADB:
 
     # Streamer
     def _stream_worker(self, serial: str):
-        remote = "/sdcard/_tmp_stream.png"
         interval = 1.0 / self.fps
         stop = self._stop_events[serial]
         queue = self._frame_queues[serial]
-
+        
+        # Use PNG format for consistency with template images
+        cmd = [self.adb, "-s", serial, "exec-out", "screencap", "-p"]
+        
         while not stop.is_set():
             t0 = time.time()
-            self.shell(serial, f"screencap {remote}")
-            cmd = [self.adb, "-s", serial, "exec-out", f"cat {remote}"]
+            
             try:
                 raw = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+                
+                if raw:
+                    arr = np.frombuffer(raw, np.uint8)
+                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    
+                    if frame is not None:
+                        if len(queue) >= 2:
+                            queue.popleft()
+                        queue.append(frame)
+                        
             except subprocess.CalledProcessError:
-                raw = b""
-            if raw:
-                arr = np.frombuffer(raw, np.uint8)
-                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if frame is not None:
-                    if len(queue) >= 2:
-                        queue.popleft()
-                    queue.append(frame)
-            self.shell(serial, f"rm {remote}")
+                pass
+            except Exception as e:
+                print(f"[{serial}] Stream error: {e}")
+            
             elapsed = time.time() - t0
             if elapsed < interval:
                 time.sleep(interval - elapsed)
-
+    
     def start_stream(self, serial: str) -> None:
         if serial in self._stream_threads:
             return

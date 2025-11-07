@@ -36,7 +36,7 @@ from common_values import (
 REPLAY_ROOT = Path("replays")
 REPLAY_ROOT.mkdir(exist_ok=True)
 
-mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=60)
+mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=30)
 mumu.restart_adb()
 ports = mumu.scan_ports()
 serials = mumu.connect_all(ports)
