@@ -63,14 +63,14 @@ def upload_worker():
             break
         serial, replay_dir, arena_idx, replay_id = item
         try:
-            rel_path = replay_dir.relative_to(REPLAY_ROOT)
-            path_in_repo = rel_path.as_posix()
+            padded_arena = f"arena_{arena_idx:02d}"
+            path_in_repo = f"{padded_arena}/{replay_id}"
             api.upload_folder(
                 folder_path=str(replay_dir),
                 repo_id=REPO_ID,
                 repo_type="dataset",
                 path_in_repo=path_in_repo,
-                commit_message=f"Replay arena {arena_idx} {replay_id}",
+                commit_message=f"Replay arena {arena_idx:02d} {replay_id}",
                 token=HF_TOKEN,
             )
             print(f"[{serial}] Uploaded {path_in_repo}")
