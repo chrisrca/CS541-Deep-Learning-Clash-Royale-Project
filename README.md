@@ -1,7 +1,9 @@
 ### Basic Setup:
 1. Install [python](https://www.python.org/downloads/)
-2. Install [mumuplayer](https://www.mumuplayer.com/) and create virtual devices using the `+ New` button
-3. Install [tesseract](https://github.com/UB-Mannheim/tesseract/wiki#:~:text=tesseract%2Docr%2Dw64%2Dsetup%2D5.5.0.20241111.exe%20(64%20bit)) and add `C:\Program Files\Tesseract-OCR` to PATH
-4. Install packages `pip install -r requirements.txt`
+2. Install packages `pip install -r requirements.txt`
+3. Install [mumuplayer](https://www.mumuplayer.com/) and create virtual devices using the `+ New` button
+4. Ensure the device resolution is portrait 540 x 960
+5. Install Clash Royale using the Play Store (Not the app center)
+6. Play through the tutorial games
 
 With MuMu device(s) running, run `main.py`.
