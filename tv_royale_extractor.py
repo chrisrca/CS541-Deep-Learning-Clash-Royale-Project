@@ -36,7 +36,7 @@ from common_values import (
 REPLAY_ROOT = Path("replays")
 REPLAY_ROOT.mkdir(exist_ok=True)
 
-mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=30)
+mumu = MuMuADB(adb_path="scrcpy/adb.exe")
 mumu.restart_adb()
 ports = mumu.scan_ports()
 serials = mumu.connect_all(ports)
@@ -277,8 +277,8 @@ def record_and_queue_replay(serial: str, arena_idx: int):
 
         cur_hash = hashlib.md5(frame.tobytes()).hexdigest()
         if last_hash is None or cur_hash != last_hash:
-            if frame_counter > 10:  # skip UI overlay at start
-                fp = replay_dir / f"{frame_counter - 10:05d}.png"
+            if frame_counter > 40:  # skip UI overlay at start
+                fp = replay_dir / f"{frame_counter - 40:05d}.png"
                 cv2.imwrite(str(fp), frame)
                 saved_paths.append(fp)
             frame_counter += 1
@@ -304,8 +304,8 @@ def record_and_queue_replay(serial: str, arena_idx: int):
     else:
         print(f"[{serial}] RECORD TIMEOUT after {RECORD_TIMEOUT}s")
 
-    # trim last 8 frames (win/lose screen)
-    to_remove = saved_paths[-8:]
+    # trim last 40 frames (win/lose screen)
+    to_remove = saved_paths[-40:]
     for p in to_remove:
         if p.exists():
             p.unlink()
