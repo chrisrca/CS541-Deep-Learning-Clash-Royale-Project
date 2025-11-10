@@ -7,9 +7,12 @@ import time
 import uuid
 import cv2
 import numpy as np
-from huggingface_hub import HfApi
-from threading import Thread
+import pyarrow as pa
+import pyarrow.parquet as pq
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
+from huggingface_hub import HfApi, create_commit, CommitOperationAdd
+from threading import Thread
 from pathlib import Path
 from mumu_adb import MuMuADB
 from common_values import (
@@ -54,32 +57,70 @@ arena_files = sorted(
 TOTAL_ARENAS = len(arena_files)
 print(f"Found {TOTAL_ARENAS} arena identifiers")
 
+# Upload
+UPLOAD_WORKERS = 3
+BATCH_SIZE = 3
+executor = ThreadPoolExecutor(max_workers=UPLOAD_WORKERS)
 upload_queue = queue.Queue()
 
-def upload_worker():
-    while True:
-        item = upload_queue.get()
-        if item is None:
-            break
-        serial, replay_dir, arena_idx, replay_id = item
-        try:
-            padded_arena = f"arena_{arena_idx:02d}"
-            path_in_repo = f"{padded_arena}/{replay_id}"
-            api.upload_folder(
-                folder_path=str(replay_dir),
-                repo_id=REPO_ID,
-                repo_type="dataset",
-                path_in_repo=path_in_repo,
-                commit_message=f"Replay arena {arena_idx:02d} {replay_id}",
-                token=HF_TOKEN,
+def upload_batch(items):
+    if not items:
+        return
+    operations = []
+    for serial, replay_dir, arena_idx, replay_id in items:
+        parquet_path = replay_dir / "frames.parquet"
+        preview_path = replay_dir / "preview.jpg"
+        padded = f"arena_{arena_idx:02d}"
+        operations.append(
+            CommitOperationAdd(path_or_fileobj=str(parquet_path), path_in_repo=f"{padded}/{replay_id}/frames.parquet")
+        )
+        if preview_path.exists():
+            operations.append(
+                CommitOperationAdd(path_or_fileobj=str(preview_path), path_in_repo=f"{padded}/{replay_id}/preview.jpg")
             )
-            print(f"[{serial}] Uploaded {path_in_repo}")
-            shutil.rmtree(replay_dir)
-        except Exception as e:
-            print(f"[{serial}] Upload failed: {e}")
+    try:
+        create_commit(
+            repo_id=REPO_ID,
+            repo_type="dataset",
+            operations=operations,
+            commit_message=f"Batch upload: {len(items)} replays (arenas {[f'{a:02d}' for _, _, a, _ in items]})",
+            token=HF_TOKEN,
+        )
+        print(f"[UPLOAD] SUCCESS: {len(items)} replays")
+        for _, replay_dir, _, _ in items:
+            shutil.rmtree(replay_dir, ignore_errors=True)
+    except Exception as e:
+        print(f"[UPLOAD ERROR] Batch failed: {e}")
 
-uploader = Thread(target=upload_worker, daemon=True)
-uploader.start()
+def batch_uploader():
+    batch = []
+    while True:
+        try:
+            item = upload_queue.get(timeout=60)
+            if item is None:
+                break
+            batch.append(item)
+            if len(batch) >= BATCH_SIZE:
+                executor.submit(upload_batch, batch.copy())
+                batch.clear()
+        except queue.Empty:
+            if batch:
+                executor.submit(upload_batch, batch.copy())
+                batch.clear()
+
+batcher = Thread(target=batch_uploader, daemon=True)
+batcher.start()
+
+def cleanup_old_replays():
+    while True:
+        time.sleep(1800)  # 30 min
+        for p in REPLAY_ROOT.iterdir():
+            if p.is_dir() and (time.time() - p.stat().st_mtime > 3600):  # >1hr
+                shutil.rmtree(p, ignore_errors=True)
+                print(f"[CLEANUP] Removed old: {p}")
+
+cleanup_thread = Thread(target=cleanup_old_replays, daemon=True)
+cleanup_thread.start()
 
 def open_clash_royale(serial: str):
     mumu.shell(serial, "am force-stop com.supercell.clashroyale")
@@ -265,7 +306,7 @@ def record_and_queue_replay(serial: str, arena_idx: int):
 
     frame_counter = 0
     last_hash = None
-    saved_paths = []
+    frames_buffer = [] # in-memory list for Parquet
 
     start_time = time.time()
     RECORD_TIMEOUT = 5 * 60  # 5 minutes
@@ -278,9 +319,13 @@ def record_and_queue_replay(serial: str, arena_idx: int):
         cur_hash = hashlib.md5(frame.tobytes()).hexdigest()
         if last_hash is None or cur_hash != last_hash:
             if frame_counter > 40:  # skip UI overlay at start
-                fp = replay_dir / f"{frame_counter - 40:05d}.png"
-                cv2.imwrite(str(fp), frame)
-                saved_paths.append(fp)
+                # Encode to PNG bytes in memory
+                _, png_bytes = cv2.imencode('.png', frame)
+                frames_buffer.append({
+                    "frame_id": frame_counter - 40,
+                    "image": png_bytes.tobytes(),
+                    "hash": cur_hash
+                })
             frame_counter += 1
             last_hash = cur_hash
 
@@ -304,17 +349,35 @@ def record_and_queue_replay(serial: str, arena_idx: int):
     else:
         print(f"[{serial}] RECORD TIMEOUT after {RECORD_TIMEOUT}s")
 
-    # trim last 40 frames (win/lose screen)
-    to_remove = saved_paths[-40:]
-    for p in to_remove:
-        if p.exists():
-            p.unlink()
-    if to_remove:
-        print(f"[{serial}] Removed {len(to_remove)} trailing frames")
+    # Trim last 40 frames (win/lose screen)
+    frames_buffer = frames_buffer[:-40] if len(frames_buffer) > 40 else frames_buffer
 
-    # Queue for background upload
+    if not frames_buffer:
+        print(f"[{serial}] No frames recorded - discarding")
+        shutil.rmtree(replay_dir, ignore_errors=True)
+        return
+
+    # Save preview from first frame
+    first_bytes = frames_buffer[0]["image"]
+    first_img = cv2.imdecode(np.frombuffer(first_bytes, np.uint8), cv2.IMREAD_COLOR)
+    preview_path = replay_dir / "preview.jpg"
+    cv2.imwrite(str(preview_path), first_img)
+
+    # Write Parquet (ZSTD compression)
+    table = pa.Table.from_pylist(frames_buffer)
+    parquet_path = replay_dir / "frames.parquet"
+    pq.write_table(
+        table,
+        str(parquet_path),
+        compression="zstd",
+        use_dictionary=True,
+        write_statistics=True
+    )
+    print(f"[{serial}] Saved {len(frames_buffer)} frames → {parquet_path.name} ({parquet_path.stat().st_size / 1e6:.1f} MB)")
+
+    # Queue for upload
     upload_queue.put((serial, replay_dir, arena_idx, replay_id))
-    print(f"[{serial}] Queued upload for arena {arena_idx}")
+    print(f"[{serial}] Queued Parquet upload for arena {arena_idx}")
 
 def watch_replay(arena_index: int, serial: str):
     print(f"[{serial}] Starting to watch arena {arena_index}")
