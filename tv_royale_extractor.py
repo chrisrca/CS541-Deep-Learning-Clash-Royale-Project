@@ -323,7 +323,10 @@ def record_and_queue_replay(serial: str, arena_idx: int):
                 _, png_bytes = cv2.imencode('.png', frame)
                 frames_buffer.append({
                     "frame_id": frame_counter - 40,
-                    "image": png_bytes.tobytes(),
+                    "image": {
+                        "bytes": png_bytes.tobytes(),
+                        "path": f"frame_{frame_counter - 40:05d}.png"
+                    },
                     "hash": cur_hash
                 })
             frame_counter += 1
