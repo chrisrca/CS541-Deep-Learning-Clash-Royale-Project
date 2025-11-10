@@ -6,4 +6,4 @@
 5. Install Clash Royale using the Play Store (Not the app center)
 6. Play through the tutorial games
 
-With MuMu device(s) running, run `main.py`.
+With MuMu device(s) running, run `tv_royale_extractor.py`.
