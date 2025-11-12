@@ -1,15 +1,17 @@
 import glob
 import hashlib
 import os
-import queue
+import json
 import shutil
 import time
 import uuid
 import cv2
 import numpy as np
-from huggingface_hub import HfApi
-from threading import Thread
+import pyarrow as pa
+import pyarrow.parquet as pq
 from dotenv import load_dotenv
+from huggingface_hub import HfApi, create_commit, CommitOperationAdd
+from threading import Thread
 from pathlib import Path
 from mumu_adb import MuMuADB
 from common_values import (
@@ -36,7 +38,7 @@ from common_values import (
 REPLAY_ROOT = Path("replays")
 REPLAY_ROOT.mkdir(exist_ok=True)
 
-mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=30)
+mumu = MuMuADB(adb_path="scrcpy/adb.exe")
 mumu.restart_adb()
 ports = mumu.scan_ports()
 serials = mumu.connect_all(ports)
@@ -54,32 +56,102 @@ arena_files = sorted(
 TOTAL_ARENAS = len(arena_files)
 print(f"Found {TOTAL_ARENAS} arena identifiers")
 
-upload_queue = queue.Queue()
+# Queue
+QUEUE_FILE = REPLAY_ROOT / "upload_queue.jsonl"
+QUEUE_FILE.touch(exist_ok=True)
+
+def append_to_queue(serial, replay_dir, arena_idx, replay_id):
+    item = {
+        "serial": serial,
+        "replay_dir": str(replay_dir),
+        "arena_idx": arena_idx,
+        "replay_id": str(replay_id),
+        "timestamp": time.time()
+    }
+    with open(QUEUE_FILE, "a") as f:
+        f.write(json.dumps(item) + "\n")
+    total_parquets = sum(1 for _ in REPLAY_ROOT.rglob("*.parquet"))
+    print(f"[{serial}] Queued {QUEUE_FILE.name} ({total_parquets} total)")
 
 def upload_worker():
     while True:
-        item = upload_queue.get()
-        if item is None:
-            break
-        serial, replay_dir, arena_idx, replay_id = item
         try:
-            padded_arena = f"arena_{arena_idx:02d}"
-            path_in_repo = f"{padded_arena}/{replay_id}"
-            api.upload_folder(
-                folder_path=str(replay_dir),
-                repo_id=REPO_ID,
-                repo_type="dataset",
-                path_in_repo=path_in_repo,
-                commit_message=f"Replay arena {arena_idx:02d} {replay_id}",
-                token=HF_TOKEN,
-            )
-            print(f"[{serial}] Uploaded {path_in_repo}")
-            shutil.rmtree(replay_dir)
-        except Exception as e:
-            print(f"[{serial}] Upload failed: {e}")
+            pending = []
+            if QUEUE_FILE.exists():
+                with open(QUEUE_FILE, "r") as f:
+                    for line in f:
+                        try:
+                            item = json.loads(line.strip())
+                            replay_dir = Path(item["replay_dir"])
+                            if replay_dir.exists():
+                                pending.append((item["serial"], replay_dir, item["arena_idx"], item["replay_id"]))
+                        except:
+                            continue
 
-uploader = Thread(target=upload_worker, daemon=True)
-uploader.start()
+            if not pending:
+                print("[UPLOAD] Queue empty — sleeping 10 min")
+                time.sleep(600)
+                continue
+
+            for serial, replay_dir, arena_idx, replay_id in pending:
+                print(f"[UPLOAD] Uploading {replay_id} from arena {arena_idx:02d}")
+                try:
+                    padded = f"arena_{arena_idx:02d}"
+                    parquet_path = replay_dir / "frames.parquet"
+                    preview_path = replay_dir / "preview.jpg"
+
+                    operations = [
+                        CommitOperationAdd(
+                            path_or_fileobj=str(parquet_path.as_posix()),
+                            path_in_repo=f"{padded}/{replay_id}/frames.parquet"
+                        ),
+                        CommitOperationAdd(
+                            path_or_fileobj=str(preview_path.as_posix()),
+                            path_in_repo=f"{padded}/{replay_id}/preview.jpg"
+                        )
+                    ]
+
+                    create_commit(
+                        repo_id=REPO_ID,
+                        repo_type="dataset",
+                        operations=operations,
+                        commit_message=f"Replay {replay_id} (arena {arena_idx:02d})",
+                        token=HF_TOKEN
+                    )
+                    print(f"[UPLOAD] SUCCESS: {replay_id}")
+                    shutil.rmtree(replay_dir, ignore_errors=True)
+
+                    # Remove from queue
+                    remaining = []
+                    for line in open(QUEUE_FILE):
+                        if replay_id not in line:
+                            remaining.append(line)
+                    with open(QUEUE_FILE, "w") as f:
+                        f.writelines(remaining)
+
+                    time.sleep(5)
+                except Exception as e:
+                    print(f"[UPLOAD ERROR] {replay_id}: {e} — retrying in 60s")
+                    time.sleep(60)
+                    break
+
+        except Exception as e:
+            print(f"[UPLOAD CRITICAL] {e} — retrying in 60s")
+            time.sleep(60)
+
+upload_thread = Thread(target=upload_worker, daemon=True)
+upload_thread.start()
+
+def cleanup_old_replays():
+    while True:
+        time.sleep(1800)
+        for p in REPLAY_ROOT.iterdir():
+            if p.is_dir() and (time.time() - p.stat().st_mtime > 3600):
+                shutil.rmtree(p, ignore_errors=True)
+                print(f"[CLEANUP] Removed old: {p}")
+
+cleanup_thread = Thread(target=cleanup_old_replays, daemon=True)
+cleanup_thread.start()
 
 def open_clash_royale(serial: str):
     mumu.shell(serial, "am force-stop com.supercell.clashroyale")
@@ -168,7 +240,6 @@ def jump_to_assigned_arena(serial: str) -> bool:
         print(f"[{serial}] Failed to detect current arena")
         return False
 
-    # Compute shortest path with wrap
     forward = (target_start - current) % TOTAL_ARENAS
     backward = (current - target_start) % TOTAL_ARENAS
 
@@ -222,14 +293,12 @@ def traverse_and_find_unwatched(serial: str):
             print(f"[{serial}] Reached end of arenas")
             break
 
-        # Check if already watched
         if not is_watched(serial):
             print(f"[{serial}] Should watch arena {current_arena}")
             return current_arena
 
         print(f"[{serial}] Arena {current_arena} already watched")
         
-        # Move to next
         if current_arena < end_arena:
             mumu.tap(serial, *TV_ROYALE_RIGHT)
             time.sleep(1)
@@ -265,10 +334,10 @@ def record_and_queue_replay(serial: str, arena_idx: int):
 
     frame_counter = 0
     last_hash = None
-    saved_paths = []
+    frames_buffer = []
 
     start_time = time.time()
-    RECORD_TIMEOUT = 5 * 60  # 5 minutes
+    RECORD_TIMEOUT = 7 * 60
 
     print(f"[{serial}] Recording arena {arena_idx}")
 
@@ -277,14 +346,19 @@ def record_and_queue_replay(serial: str, arena_idx: int):
 
         cur_hash = hashlib.md5(frame.tobytes()).hexdigest()
         if last_hash is None or cur_hash != last_hash:
-            if frame_counter > 10:  # skip UI overlay at start
-                fp = replay_dir / f"{frame_counter - 10:05d}.png"
-                cv2.imwrite(str(fp), frame)
-                saved_paths.append(fp)
+            if frame_counter > 40:
+                _, png_bytes = cv2.imencode('.png', frame)
+                frames_buffer.append({
+                    "frame_id": frame_counter - 40,
+                    "image": {
+                        "bytes": png_bytes.tobytes(),
+                        "path": f"frame_{frame_counter - 40:05d}.png"
+                    },
+                    "hash": cur_hash
+                })
             frame_counter += 1
             last_hash = cur_hash
 
-        # End of replay detection
         top = frame[*REPLAY_TOP_COLOR_REGION]
         bot = frame[*REPLAY_BOTTOM_COLOR_REGION]
         btn = frame[*REPLAY_OK_BUTTON_REGION]
@@ -303,18 +377,37 @@ def record_and_queue_replay(serial: str, arena_idx: int):
 
     else:
         print(f"[{serial}] RECORD TIMEOUT after {RECORD_TIMEOUT}s")
+        shutil.rmtree(replay_dir, ignore_errors=True)
+        return
 
-    # trim last 8 frames (win/lose screen)
-    to_remove = saved_paths[-8:]
-    for p in to_remove:
-        if p.exists():
-            p.unlink()
-    if to_remove:
-        print(f"[{serial}] Removed {len(to_remove)} trailing frames")
+    frames_buffer = frames_buffer[:-40] if len(frames_buffer) > 40 else frames_buffer
 
-    # Queue for background upload
-    upload_queue.put((serial, replay_dir, arena_idx, replay_id))
-    print(f"[{serial}] Queued upload for arena {arena_idx}")
+    if not frames_buffer:
+        print(f"[{serial}] No frames recorded - discarding")
+        shutil.rmtree(replay_dir, ignore_errors=True)
+        return
+
+    # Save preview jpg
+    first_image_struct = frames_buffer[0]["image"]
+    first_bytes = first_image_struct["bytes"]
+    first_img = cv2.imdecode(np.frombuffer(first_bytes, np.uint8), cv2.IMREAD_COLOR)
+    cv2.imwrite(str(replay_dir / "preview.jpg"), first_img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+    # Write parquet
+    table = pa.Table.from_pylist(frames_buffer)
+    parquet_path = replay_dir / "frames.parquet"
+    pq.write_table(
+        table,
+        str(parquet_path),
+        compression="zstd",
+        use_dictionary=True,
+        write_statistics=True
+    )
+    print(f"[{serial}] Saved {len(frames_buffer)} frames {parquet_path.name} ({parquet_path.stat().st_size / 1e6:.1f} MB)")
+
+    # Queue
+    append_to_queue(serial, replay_dir, arena_idx, replay_id)
+    print(f"[{serial}] Queued Parquet + preview upload for arena {arena_idx}")
 
 def watch_replay(arena_index: int, serial: str):
     print(f"[{serial}] Starting to watch arena {arena_index}")
@@ -322,12 +415,10 @@ def watch_replay(arena_index: int, serial: str):
     mumu.tap(serial, *WATCH_BUTTON)
     time.sleep(1)
     
-    # Wait for replay to start
     if not wait_for_replay_start(serial):
         print(f"[{serial}] Replay failed to start")
         return
     
-    # Record replay
     print(f"[{serial}] Replay for arena {arena_index} is now playing.")
     record_and_queue_replay(serial, arena_index)
 
@@ -360,7 +451,7 @@ def worker(serial: str):
 
         if arena_to_watch is None:
             print(f"[{serial}] All replays watched in segment - sleeping 10 minutes")
-            time.sleep(600) # 10 minutes
+            time.sleep(600)
             continue
         else:
             watch_replay(arena_to_watch, serial)
