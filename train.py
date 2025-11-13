@@ -5,6 +5,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+grid_w = 18
+grid_h = 32
+
 # 1) list of shard URLs (on Hugging Face raw files or an HTTP/S endpoint)
 # e.g. ["https://.../shard-0000.tar", "https://.../shard-0001.tar", ...]
 shard_urls = ["https://your-hf-repo/.../shard-0000.tar", "https://your-hf-repo/.../shard-0001.tar"]
@@ -29,11 +32,15 @@ def transform(sample):
     label_obj = json.loads(label_json.decode("utf-8"))
     if label_obj is None:
         label_card = -1
-        label_xy = torch.tensor([-1.0, -1.0], dtype=torch.float32)
+        label_placement = torch.tensor([-1], dtype=torch.float32)
     else:
         label_card = int(label_obj["card"])
-        label_xy = torch.tensor([label_obj["x"], label_obj["y"]], dtype=torch.float32)
-    return {"frames": frames, "extra": extra, "label_card": label_card, "label_xy": label_xy}
+        tile_index = label_obj["tile_y"] * grid_w + label_obj["tile_x"]
+        label_placement = torch.tensor(tile_index, dtype=torch.float32)
+    return {"frames": frames,
+            "extra": extra,
+            "label_card": label_card,
+            "label_placement": label_placement}
 
 dataset = dataset.map(transform)
 
