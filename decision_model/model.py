@@ -293,8 +293,9 @@ class ConvLSTMCardPlacementModel(nn.Module):
 if __name__ == "__main__":
     # toy example
     B, T, C, H, W = 4, 8, 3, 224, 224
-    num_cards = 8
-    extra_feat_dim = 6  # elixir, our_tower_hp, opp_tower_hp, etc.
+    num_cards = 8 # Max 8
+    extra_feat_dim = 7 # elixir, blue left tower health, blue right tower health, blue king tower health,
+                       # red left tower health, red right tower health, red king tower health
     grid_h, grid_w = 32, 18
 
     model = ConvLSTMCardPlacementModel(
