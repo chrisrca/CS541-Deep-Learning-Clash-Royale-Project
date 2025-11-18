@@ -19,7 +19,7 @@ class CRElement:
 
     elixir = BoundingBox(origin=(103 - 84,823 + 97), size=(30,25))
     elixir_bar = BoundingBox(origin=(48,839+ 97), size=(418+54,3))
-    arena = BoundingBox(origin=(55,140), size=(430,675))
+    arena = BoundingBox(origin=(57,137), size=(428,683))
 
     cards_in_hand = []
     card_space = 5
@@ -78,7 +78,7 @@ class CRElement:
         h, w = img.shape[:2]
         cx, cy = w // 2, h // 2
         radius = int(np.hypot(cx, cy))
-        readiness = current_elixir / cost
+        readiness = 1 - current_elixir / cost
 
         steps = max(10, int(100 * readiness))
         angles = np.linspace(-math.pi/2, -math.pi/2 - 2*math.pi*readiness, steps)
@@ -114,19 +114,28 @@ class CRElement:
         return blurred
     
     @staticmethod
-    def best_match(template: np.ndarray, labelled_image_collection : list[tuple[str, np.ndarray]], shearing: tuple[int, int] = (0,0)) -> tuple[float, str]:
+    def best_match(template: np.ndarray, labelled_image_collection : dict[str, np.ndarray], shearing: tuple[int, int] = (0,0), show=False) -> tuple[float, str]:
         """
         
         """
         best_score, best_match = 0, None
         shear_x, shear_y = shearing[1], shearing[0]
         sheared_template = template[shear_y:-shear_y, shear_x:-shear_x]
-        for name, image in labelled_image_collection:
+        if(show):
+            cv2.imshow("template", sheared_template)
+            cv2.waitKey(0)
+        for name, image in labelled_image_collection.items():
+            if type(image) != np.ndarray:
+                image = image.BGR
+            
             res = cv2.matchTemplate(image, sheared_template, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, _ = cv2.minMaxLoc(res)
             if max_val > best_score:
                 best_match = name
                 best_score = max_val
+        if(show):
+            cv2.imshow("match", labelled_image_collection[best_match])
+            cv2.waitKey(0)
         return best_score, best_match
     
     class Card():
