@@ -376,7 +376,7 @@ if __name__ == "__main__":
         "val_ratio": 0.1,
         "test_ratio": 0.1,
         "log_every": 1,
-        "rolling_average_window": 10,
+        "rolling_average_window": 100,
         "output_dir": "./checkpoints",
     }
 
