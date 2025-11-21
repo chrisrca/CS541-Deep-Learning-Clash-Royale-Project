@@ -211,9 +211,12 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
     total_place_loss = 0.0
     total_batches = 0
 
-    frames_per_sample = config["frames_per_sample"]
+    # Accuracy metrics for card prediction
+    total_samples = 0
+    total_correct_top1 = 0
+    total_correct_top5 = 0
 
-    print(f"[Eval] Starting {split_name} epoch {epoch + 1}...")
+    frames_per_sample = config["frames_per_sample"]
 
     with torch.no_grad():
         for batch in data_loader:
@@ -249,15 +252,44 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             total_place_loss += place_loss.item()
             total_batches += 1
 
+            # Top-1 and Top-5 accuracy for card prediction
+            with torch.no_grad():
+                # Top-1
+                preds_top1 = card_logits.argmax(dim=1)
+                total_correct_top1 += (preds_top1 == labels_card).sum().item()
+
+                # Top-5 (handles case where num_classes < 5 by clamping k)
+                num_classes = card_logits.shape[1]
+                k = min(5, num_classes)
+                topk_vals, topk_idx = torch.topk(card_logits, k=k, dim=1)
+                # labels_card[:, None] to broadcast against topk_idx
+                correct_topk = (topk_idx == labels_card.unsqueeze(1)).any(dim=1)
+                total_correct_top5 += correct_topk.sum().item()
+
+                total_samples += labels_card.shape[0]
+
     avg_loss = total_loss / max(total_batches, 1)
     avg_card = total_card_loss / max(total_batches, 1)
     avg_place = total_place_loss / max(total_batches, 1)
+
+    # Compute accuracies
+    acc_top1 = total_correct_top1 / max(total_samples, 1)
+    acc_top5 = total_correct_top5 / max(total_samples, 1)
+
+    # Print a concise summary line similar to training
+    print(
+        f"[Eval] {split_name} epoch {epoch + 1}: "
+        f"loss={avg_loss:.4f}, card={avg_card:.4f}, place={avg_place:.4f}, "
+        f"acc_top1={acc_top1:.4f}, acc_top5={acc_top5:.4f}"
+    )
 
     wandb.log(
         {
             f"{split_name}/loss": avg_loss,
             f"{split_name}/card_loss": avg_card,
             f"{split_name}/place_loss": avg_place,
+            f"{split_name}/acc_top1": acc_top1,
+            f"{split_name}/acc_top5": acc_top5,
             f"{split_name}/epoch": epoch,
         }
     )
