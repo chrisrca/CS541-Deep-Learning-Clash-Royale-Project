@@ -1,120 +1,38 @@
-import glob
 import os
-from bisect import bisect_right
-
-import numpy as np
-import pyarrow.parquet as pq
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import DataLoader, random_split
 from huggingface_hub import list_repo_files, hf_hub_download
 import wandb
-from model import ConvLSTMCardPlacementModel
 
-grid_w = 18
-grid_h = 32
+from model import ConvLSTMClashRoyaleModel
+from dataset import ClashRoyaleDataset, ALL_CARDS
 
+# def get_hf_parquet_local_paths(repo_id: str, repo_type: str = "dataset"):
+#     """List all .parquet files in a Hugging Face repo and download them locally.
 
-class ParquetClashDataset(Dataset):
-    def __init__(self, files):
-        super().__init__()
-        self.files = list(files)
-        if not self.files:
-            raise ValueError("No parquet files provided to ParquetClashDataset")
+#     Returns a list of local cached file paths suitable for ParquetClashDataset.
+#     """
+#     files = list_repo_files(repo_id, repo_type=repo_type)
+#     parquet_files = [f for f in files if f.endswith(".parquet")]
+#     if not parquet_files:
+#         raise ValueError(f"No .parquet files found in HF repo: {repo_id}")
 
-        self.row_counts = []
-        self.col_counts = []
-        total = 0
-        for path in self.files:
-            pf = pq.ParquetFile(path)
-            n_rows = pf.metadata.num_rows
-            self.row_counts.append(n_rows)
-            total += n_rows
-            self.col_counts.append(total)
-
-    def __len__(self) -> int:
-        return self.col_counts[-1]
-
-    def _locate_row(self, idx: int):
-        # returns file index and row index within that file
-        file_idx = bisect_right(self.col_counts, idx)
-        prev_cum = 0 if file_idx == 0 else self.col_counts[file_idx - 1]
-        row_idx = idx - prev_cum
-        return file_idx, row_idx
-
-    def __getitem__(self, idx: int):
-        if idx < 0:
-            idx = len(self) + idx
-        if idx < 0 or idx >= len(self):
-            raise IndexError(idx)
-
-        file_idx, row_idx = self._locate_row(idx)
-        path = self.files[file_idx]
-
-        table = pq.read_table(path)
-        # slice out the single row we need
-        row_table = table.slice(row_idx, 1)
-        data = row_table.to_pydict()
-
-        frames_arr = np.array(data["frames"][0])
-        frames = torch.from_numpy(frames_arr.astype(np.float32))
-
-        if frames.ndim == 4 and frames.shape[-1] in (1, 3):
-            frames = frames.permute(0, 3, 1, 2)
-
-        frames = frames / 255.0
-
-        card = int(data["card"][0])
-        tile_x = int(data["tile_x"][0])
-        tile_y = int(data["tile_y"][0])
-
-        elixir = float(data["elixir"][0])
-
-        blue_left_princess_tower_health = int(data["blue_left_princess_tower_health"][0])
-        blue_right_princess_tower_health = int(data["blue_right_princess_tower_health"][0])
-        blue_king_tower_health = int(data["blue_king_tower_health"][0])
-        red_left_princess_tower_health = int(data["red_left_princess_tower_health"][0])
-        red_right_princess_tower_health = int(data["red_right_princess_tower_health"][0])
-        red_king_tower_health = int(data["red_king_tower_health"][0])
-
-        extra_features = torch.tensor([elixir, blue_left_princess_tower_health, blue_right_princess_tower_health, blue_king_tower_health, red_left_princess_tower_health, red_right_princess_tower_health, red_king_tower_health], dtype=torch.float32)
-
-        label_card = card
-        tile_index = tile_y * grid_w + tile_x
-        label_placement = torch.tensor(tile_index, dtype=torch.float32)
-
-        return {
-            "frames": frames,
-            "extra_features": extra_features,
-            "label_card": label_card,
-            "label_placement": label_placement,
-        }
-
-
-def get_hf_parquet_local_paths(repo_id: str, repo_type: str = "dataset"):
-    """List all .parquet files in a Hugging Face repo and download them locally.
-
-    Returns a list of local cached file paths suitable for ParquetClashDataset.
-    """
-    files = list_repo_files(repo_id, repo_type=repo_type)
-    parquet_files = [f for f in files if f.endswith(".parquet")]
-    if not parquet_files:
-        raise ValueError(f"No .parquet files found in HF repo: {repo_id}")
-
-    local_paths = []
-    for fp in parquet_files:
-        local_path = hf_hub_download(repo_id=repo_id, filename=fp, repo_type=repo_type)
-        local_paths.append(local_path)
-    return local_paths
+#     local_paths = []
+#     for fp in parquet_files:
+#         local_path = hf_hub_download(repo_id=repo_id, filename=fp, repo_type=repo_type)
+#         local_paths.append(local_path)
+#     return local_paths
 
 
 def build_dataloaders(config, device):
-    hf_repo_id = config["hf_repo_id"]
-    hf_repo_type = config.get("hf_repo_type", "dataset")
+    # hf_repo_id = config["hf_repo_id"]
+    # hf_repo_type = config.get("hf_repo_type", "dataset")
+    # parquet_paths = get_hf_parquet_local_paths(hf_repo_id, repo_type=hf_repo_type)
 
-    parquet_paths = get_hf_parquet_local_paths(hf_repo_id, repo_type=hf_repo_type)
-    dataset = ParquetClashDataset(parquet_paths)
+    parquet_paths = ["./initial_training.parquet"]
+    dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
 
     val_ratio = config.get("val_ratio", 0.1)
     test_ratio = config.get("test_ratio", 0.1)
@@ -126,24 +44,29 @@ def build_dataloaders(config, device):
     n_train = n_total - n_val - n_test
     train_dataset, val_dataset, test_dataset = random_split(dataset, [n_train, n_val, n_test])
 
+    print(f"Dataset sizes -> total: {n_total}, train: {n_train}, val: {n_val}, test: {n_test}")
+
+    # On Windows, multiprocessing DataLoader workers (num_workers>0) often cause
+    # pickling errors like `OSError: [Errno 22] Invalid argument`. To avoid this,
+    # we force single-process loading with num_workers=0.
     train_loader = DataLoader(
         train_dataset,
         batch_size=config["batch_size"],
-        num_workers=config.get("num_workers", 4),
+        num_workers=0,
         shuffle=True,
         pin_memory=(device.type == "cuda"),
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=config["batch_size"],
-        num_workers=config.get("num_workers", 4),
+        num_workers=0,
         shuffle=False,
         pin_memory=(device.type == "cuda"),
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=config["batch_size"],
-        num_workers=config.get("num_workers", 4),
+        num_workers=0,
         shuffle=False,
         pin_memory=(device.type == "cuda"),
     )
@@ -151,8 +74,11 @@ def build_dataloaders(config, device):
 
 
 def build_model(config, device):
-    num_cards = config["num_cards"]
-    extra_feat_dim = config["extra_feat_dim"]
+    # We add +1 to num_cards to account for the "No-Op" / "Wait" action
+    num_cards = config["num_cards"] + 1
+    grid_h = config["grid_h"]
+    grid_w = config["grid_w"]
+    numeric_feat_dim = config["numeric_feat_dim"]
     convlstm_hidden = config["convlstm_hidden"]
     backbone_proj_channels = config["backbone_proj_channels"]
     use_pretrained = config.get("backbone_pretrained", False)
@@ -162,9 +88,9 @@ def build_model(config, device):
 
         pretrained_weights = MobileNet_V2_Weights.DEFAULT
 
-    model = ConvLSTMCardPlacementModel(
+    model = ConvLSTMClashRoyaleModel(
         num_cards=num_cards,
-        extra_feat_dim=extra_feat_dim,
+        numeric_feat_dim=numeric_feat_dim,
         grid_h=grid_h,
         grid_w=grid_w,
         convlstm_hidden=convlstm_hidden,
@@ -181,13 +107,26 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
     total_place_loss = 0.0
     total_batches = 0
 
+    # Store per-batch losses to compute rolling averages for logging.
+    batch_losses = []
+    batch_card_losses = []
+    batch_place_losses = []
+
     frames_per_sample = config["frames_per_sample"]
+
+    num_epochs = config.get("num_epochs", None)
+    if num_epochs is not None:
+        print(f"Starting training epoch {epoch + 1}/{num_epochs}...")
+    else:
+        print(f"Starting training epoch {epoch + 1}...")
 
     for batch_idx, batch in enumerate(train_loader):
         frames = batch["frames"].to(device)
-        extra_features = batch["extra_features"].to(device)
+        numeric_features = batch["numeric_features"].to(device)
         labels_card = batch["label_card"].long().to(device)
         labels_placement = batch["label_placement"].long().to(device).view(-1)
+        
+        mask = batch["mask"].to(device)
 
         if frames.ndim == 4:
             frames = frames.unsqueeze(1)
@@ -197,12 +136,19 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
         frames = frames[:, -use_T:, ...]
 
         optimizer.zero_grad(set_to_none=True)
-        outputs = model(frames, extra_features)
+        outputs = model(frames, numeric_features, action_mask=mask)
         card_logits = outputs["card_logits"]
-        placement_logits = outputs["placement_logits"]
+        placement_logits = outputs["placement_logits"] # (B, num_cards, grid_cells)
+
+        # Gather the placement logits for the ground-truth card
+        # labels_card: (B,) containing the index of the card played
+        B_dim = placement_logits.shape[0]
+        # We want [B, grid_cells] from [B, num_cards, grid_cells]
+        # using labels_card as the index for dim 1
+        relevant_placement_logits = placement_logits[torch.arange(B_dim, device=device), labels_card, :]
 
         card_loss = card_loss_fn(card_logits, labels_card)
-        place_loss = place_loss_fn(placement_logits, labels_placement)
+        place_loss = place_loss_fn(relevant_placement_logits, labels_placement)
         loss = card_loss + place_loss
 
         loss.backward()
@@ -218,12 +164,30 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
         total_place_loss += place_loss.item()
         total_batches += 1
 
-        if (batch_idx + 1) % config.get("log_every", 100) == 0:
+        batch_losses.append(loss.item())
+        batch_card_losses.append(card_loss.item())
+        batch_place_losses.append(place_loss.item())
+
+        if (batch_idx + 1) % config["log_every"] == 0:
+            # Compute rolling average over the last N batches
+            window = config["rolling_average_window"]
+            start_idx = max(0, len(batch_losses) - window)
+            window_losses = batch_losses[start_idx:]
+            window_card_losses = batch_card_losses[start_idx:]
+            window_place_losses = batch_place_losses[start_idx:]
+            avg_window_loss = sum(window_losses) / max(len(window_losses), 1)
+            avg_window_card = sum(window_card_losses) / max(len(window_card_losses), 1)
+            avg_window_place = sum(window_place_losses) / max(len(window_place_losses), 1)
+
+            print(
+                f"[Train] epoch {epoch + 1}, batch {batch_idx + 1}/{len(train_loader)} "
+                f"loss={avg_window_loss:.4f}, card={avg_window_card:.4f}, place={avg_window_place:.4f}"
+            )
             wandb.log(
                 {
-                    "train/loss": total_loss / total_batches,
-                    "train/card_loss": total_card_loss / total_batches,
-                    "train/place_loss": total_place_loss / total_batches,
+                    "train/loss": avg_window_loss,
+                    "train/card_loss": avg_window_card,
+                    "train/place_loss": avg_window_place,
                     "train/epoch": epoch,
                     "train/step": epoch * len(train_loader) + batch_idx,
                 }
@@ -232,6 +196,11 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
     avg_loss = total_loss / max(total_batches, 1)
     avg_card = total_card_loss / max(total_batches, 1)
     avg_place = total_place_loss / max(total_batches, 1)
+
+    print(
+        f"[Train] epoch {epoch + 1} completed: "
+        f"loss={avg_loss:.4f}, card={avg_card:.4f}, place={avg_place:.4f}"
+    )
     return avg_loss, avg_card, avg_place
 
 
@@ -244,12 +213,16 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
 
     frames_per_sample = config["frames_per_sample"]
 
+    print(f"[Eval] Starting {split_name} epoch {epoch + 1}...")
+
     with torch.no_grad():
-        for batch_idx, batch in enumerate(data_loader):
+        for batch in data_loader:
             frames = batch["frames"].to(device)
-            extra_features = batch["extra_features"].to(device)
+            numeric_features = batch["numeric_features"].to(device)
             labels_card = batch["label_card"].long().to(device)
             labels_placement = batch["label_placement"].long().to(device).view(-1)
+            
+            mask = batch["mask"].to(device)
 
             if frames.ndim == 4:
                 frames = frames.unsqueeze(1)
@@ -258,12 +231,17 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             use_T = min(frames_per_sample, T)
             frames = frames[:, -use_T:, ...]
 
-            outputs = model(frames, extra_features)
+            outputs = model(frames, numeric_features, action_mask=mask)
             card_logits = outputs["card_logits"]
             placement_logits = outputs["placement_logits"]
 
+            # Select placement logits for the ground-truth card, to match
+            # the training-time loss computation shape: [B, grid_cells]
+            B_dim = placement_logits.shape[0]
+            relevant_placement_logits = placement_logits[torch.arange(B_dim, device=device), labels_card, :]
+
             card_loss = card_loss_fn(card_logits, labels_card)
-            place_loss = place_loss_fn(placement_logits, labels_placement)
+            place_loss = place_loss_fn(relevant_placement_logits, labels_placement)
             loss = card_loss + place_loss
 
             total_loss += loss.item()
@@ -287,19 +265,27 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
     return avg_loss, avg_card, avg_place
 
 
-def run_training(train_config, runtime_config):
-    with wandb.init(config=train_config):
+def run_training(game_config, hyperparameter_config, runtime_config):
+    with wandb.init(project="clash-royale-decision-model", config=hyperparameter_config):
         wandb_config = wandb.config
         config = dict(wandb_config)
+        config.update(game_config)
         config.update(runtime_config)
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device}")
 
         train_loader, val_loader, test_loader = build_dataloaders(config, device)
         model = build_model(config, device)
 
+        # Log basic model information
+        num_params = sum(p.numel() for p in model.parameters())
+        num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Model: {model.__class__.__name__}")
+        print(f"Total parameters: {num_params:,}; trainable: {num_trainable:,}")
+
         card_loss_fn = nn.CrossEntropyLoss()
-        place_loss_fn = nn.CrossEntropyLoss()
+        place_loss_fn = nn.CrossEntropyLoss(ignore_index=-1) # No placement loss when no card was played
 
         optimizer = optim.AdamW(
             model.parameters(),
@@ -363,30 +349,35 @@ def run_training(train_config, runtime_config):
 
 if __name__ == "__main__":
     # hyperparameters tracked by wandb
-    train_config = {
+    game_config = {
+        "num_cards": len(ALL_CARDS),
+        "grid_h": 32,
+        "grid_w": 18,
+        "numeric_feat_dim": 7,
+    }
+    
+    hyperparameter_config = {
         "batch_size": 16,
-        "num_epochs": 5,
-        "learning_rate": 3e-4,
+        "num_epochs": 10,
+        "learning_rate": 6e-4,
         "weight_decay": 1e-2,
         "use_scheduler": True,
         "max_grad_norm": 1.0,
-        "frames_per_sample": 4,
-        "num_cards": 8,
-        "extra_feat_dim": 7,
+        "frames_per_sample": 1,
         "convlstm_hidden": 128,
         "backbone_proj_channels": 128,
-        "backbone_pretrained": False,
+        "backbone_pretrained": True,
     }
 
     # runtime-only parameters (not tracked by wandb)
     runtime_config = {
         "hf_repo_id": "your-username/your-parquet-repo",
         "hf_repo_type": "dataset",
-        "num_workers": 4,
         "val_ratio": 0.1,
         "test_ratio": 0.1,
-        "log_every": 100,
+        "log_every": 1,
+        "rolling_average_window": 10,
         "output_dir": "./checkpoints",
     }
 
-    run_training(train_config, runtime_config)
+    run_training(game_config, hyperparameter_config, runtime_config)

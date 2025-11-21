@@ -142,12 +142,12 @@ class MobileNetV2Backbone(nn.Module):
 # -------------------------
 # Full Model
 # -------------------------
-class ConvLSTMCardPlacementModel(nn.Module):
+class ConvLSTMClashRoyaleModel(nn.Module):
     def __init__(
         self,
         *,
         num_cards: int,
-        extra_feat_dim: int,
+        numeric_feat_dim: int,
         grid_h: int,
         grid_w: int,
         convlstm_hidden: int = 128,
@@ -169,7 +169,7 @@ class ConvLSTMCardPlacementModel(nn.Module):
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.grid_cells = grid_h * grid_w
-        self.extra_feat_dim = extra_feat_dim
+        self.extra_feat_dim = numeric_feat_dim
 
         # backbone
         self.backbone = MobileNetV2Backbone(weights=pretrained_backbone_weights, proj_out_channels=backbone_proj_channels)
@@ -184,8 +184,8 @@ class ConvLSTMCardPlacementModel(nn.Module):
         # then concat extra_feats (B, extra_feat_dim) -> MLP -> num_cards logits
         card_head_hidden = max(128, convlstm_hidden)
         self.card_head_mlp = nn.Sequential(
-            nn.LayerNorm(convlstm_hidden + extra_feat_dim),
-            nn.Linear(convlstm_hidden + extra_feat_dim, card_head_hidden),
+            nn.LayerNorm(convlstm_hidden + numeric_feat_dim),
+            nn.Linear(convlstm_hidden + numeric_feat_dim, card_head_hidden),
             nn.GELU(),
             nn.Linear(card_head_hidden, num_cards),
         )
@@ -203,7 +203,7 @@ class ConvLSTMCardPlacementModel(nn.Module):
         )
 
         # after broadcasting extra_feats, we'll have (place_mid_ch + extra_feat_dim) channels
-        fused_ch = place_mid_ch + extra_feat_dim
+        fused_ch = place_mid_ch + numeric_feat_dim
         self.place_conv_block = nn.Sequential(
             nn.Conv2d(fused_ch, fused_ch, kernel_size=3, padding=1),
             nn.BatchNorm2d(fused_ch),
@@ -213,7 +213,8 @@ class ConvLSTMCardPlacementModel(nn.Module):
             nn.GELU(),
         )
         # final logits per spatial location
-        self.place_logits = nn.Conv2d(fused_ch // 2, 1, kernel_size=1)
+        # We output 'num_cards' channels: one placement map for each card type.
+        self.place_logits = nn.Conv2d(fused_ch // 2, num_cards, kernel_size=1)
 
     def forward(self, frames: torch.Tensor, extra_feats: torch.Tensor, action_mask: Optional[torch.Tensor] = None):
         """
@@ -224,20 +225,21 @@ class ConvLSTMCardPlacementModel(nn.Module):
         Returns:
             dict with:
              - card_logits: (B, num_cards)
-             - placement_logits: (B, grid_h * grid_w)
-             - placement_map: (B, grid_h, grid_w)
+             - placement_logits: (B, num_cards, grid_h * grid_w)
+             - placement_map: (B, num_cards, grid_h, grid_w)
              - convlstm_hidden_seq: (B, T, convlstm_hidden, Hf, Wf)
         """
         B, T, C, H, W = frames.shape
         device = frames.device
 
         # 1) run backbone per-frame
-        frames_flat = frames.view(B * T, C, H, W)
+        # Use reshape to ensure contiguous memory layout if needed
+        frames_flat = frames.reshape(B * T, C, H, W)
         spatial_flat = self.backbone(frames_flat)  # (B*T, backbone_out_ch, Hf, Wf)
         _, backbone_ch, Hf, Wf = spatial_flat.shape
 
         # reshape to (B, T, C, Hf, Wf)
-        spatial_seq = spatial_flat.view(B, T, backbone_ch, Hf, Wf)
+        spatial_seq = spatial_flat.reshape(B, T, backbone_ch, Hf, Wf)
 
         # 2) run ConvLSTM over spatial_seq
         h_seq, (h_last, c_last) = self.convlstm(spatial_seq)  # h_seq: (B, T, convlstm_hidden, Hf, Wf)
@@ -252,8 +254,8 @@ class ConvLSTMCardPlacementModel(nn.Module):
 
         # apply mask if provided (mask True = legal). set illegal logits to large negative
         if action_mask is not None:
-            # ensure boolean
-            mask_bool = action_mask.to(dtype=torch.bool)
+            # ensure boolean and on correct device
+            mask_bool = action_mask.to(device=card_logits.device, dtype=torch.bool)
             large_neg = -1e9
             masked_logits = card_logits.clone()
             # mask_bool shape maybe (B, num_cards)
@@ -268,16 +270,19 @@ class ConvLSTMCardPlacementModel(nn.Module):
         extra_spatial = extra_feats.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, Hf, Wf)
         fused = torch.cat([x, extra_spatial], dim=1)  # (B, place_mid_ch + extra_feat_dim, Hf, Wf)
         x = self.place_conv_block(fused)  # (B, fused_ch//2, Hf, Wf)
-        logits_map = self.place_logits(x).squeeze(1)  # (B, Hf, Wf)
+        
+        # Output (B, num_cards, Hf, Wf)
+        logits_map = self.place_logits(x) 
 
         # resize to grid_h x grid_w
         if (Hf, Wf) != (self.grid_h, self.grid_w):
-            logits_map_resized = F.interpolate(logits_map.unsqueeze(1), size=(self.grid_h, self.grid_w),
-                                               mode='bilinear', align_corners=False).squeeze(1)  # (B, grid_h, grid_w)
+            logits_map_resized = F.interpolate(logits_map, size=(self.grid_h, self.grid_w),
+                                               mode='bilinear', align_corners=False) # (B, num_cards, grid_h, grid_w)
         else:
-            logits_map_resized = logits_map  # (B, grid_h, grid_w)
+            logits_map_resized = logits_map  # (B, num_cards, grid_h, grid_w)
 
-        placement_logits = logits_map_resized.view(B, -1)  # (B, grid_h * grid_w)
+        # Flatten spatial dims: (B, num_cards, grid_h * grid_w)
+        placement_logits = logits_map_resized.flatten(2)
 
         return {
             "card_logits": card_logits,
@@ -298,9 +303,9 @@ if __name__ == "__main__":
                        # red left tower health, red right tower health, red king tower health
     grid_h, grid_w = 32, 18
 
-    model = ConvLSTMCardPlacementModel(
+    model = ConvLSTMClashRoyaleModel(
         num_cards=num_cards,
-        extra_feat_dim=extra_feat_dim,
+        numeric_feat_dim=extra_feat_dim,
         grid_h=grid_h,
         grid_w=grid_w,
         convlstm_hidden=128,
