@@ -10,6 +10,8 @@ print(f"Analyzing {total_rows} samples...")
 # Initialize counters
 hand_size_counts = {}  # {hand_size: count}
 hand_size_examples = {}  # {hand_size: [(replay, frame), ...]}
+none_counts = {}  # {none_count: count}
+none_examples = {}  # {none_count: [(replay, frame), ...]}
 ground_truth_in_hand = 0
 ground_truth_not_in_hand = 0
 empty_hands = 0
@@ -21,6 +23,18 @@ for i in range(total_rows):
 
     # Get hand data
     raw_hand = data["hand"][0]
+
+    # Count None values
+    none_count = sum(1 for c in raw_hand if c is None)
+    none_counts[none_count] = none_counts.get(none_count, 0) + 1
+
+    # Store ALL examples for each none count
+    if none_count not in none_examples:
+        none_examples[none_count] = []
+    replay = data["replay"][0] if "replay" in data else "unknown"
+    frame = data["frame"][0] if "frame" in data else "unknown"
+    none_examples[none_count].append((replay, frame))
+
     hand_ids = []
     for c in raw_hand:
         if c in CARD_TO_ID:
@@ -64,6 +78,16 @@ for size in sorted(hand_size_counts.keys()):
     selected_examples = random.sample(all_examples, min(10, len(all_examples)))
     examples_str = ", ".join([f"<{replay}, {frame}>" for replay, frame in selected_examples])
     print(f"Hands with {size} cards: {count} ({percentage:.1f}%) [{examples_str}]")
+
+print("\n=== NONE VALUE ANALYSIS ===")
+for none_count in sorted(none_counts.keys()):
+    count = none_counts[none_count]
+    percentage = (count / total_samples) * 100
+    all_examples = none_examples.get(none_count, [])
+    # Randomly select up to 10 examples
+    selected_examples = random.sample(all_examples, min(10, len(all_examples)))
+    examples_str = ", ".join([f"<{replay}, {frame}>" for replay, frame in selected_examples])
+    print(f"Hands with {none_count} None values: {count} ({percentage:.1f}%) [{examples_str}]")
 
 print("\n=== GROUND TRUTH ANALYSIS ===")
 total_ground_truth_checks = ground_truth_in_hand + ground_truth_not_in_hand
