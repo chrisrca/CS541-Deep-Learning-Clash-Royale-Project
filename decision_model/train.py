@@ -195,8 +195,6 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
                     "train/loss": avg_window_loss,
                     "train/card_loss": avg_window_card,
                     "train/place_loss": avg_window_place,
-                    "train/epoch": epoch,
-                    "train/step": epoch * len(train_loader) + batch_idx,
                 }
             )
 
@@ -220,7 +218,7 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
 
     # Accuracy metrics for card prediction
     total_samples = 0
-    total_correct_top1 = 0
+    total_correct = 0
 
     frames_per_sample = config["frames_per_sample"]
 
@@ -259,11 +257,10 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             total_place_loss += place_loss.item()
             total_batches += 1
 
-            # Top-1 accuracy for card prediction
+            # Accuracy for card prediction
             with torch.no_grad():
-                # Top-1
-                preds_top1 = card_logits.argmax(dim=1)
-                total_correct_top1 += (preds_top1 == labels_card).sum().item()
+                preds = card_logits.argmax(dim=1)
+                total_correct += (preds == labels_card).sum().item()
 
                 total_samples += labels_card.shape[0]
 
@@ -271,14 +268,14 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
     avg_card = total_card_loss / max(total_batches, 1)
     avg_place = total_place_loss / max(total_batches, 1)
 
-    # Compute accuracies
-    acc_top1 = total_correct_top1 / max(total_samples, 1)
+    # Compute accuracy
+    accuracy = total_correct / max(total_samples, 1)
 
     # Print a concise summary line similar to training
     print(
         f"[Eval] {split_name} epoch {epoch + 1}: "
         f"loss={avg_loss:.4f}, card={avg_card:.4f}, place={avg_place:.4f}, "
-        f"acc_top1={acc_top1:.4f}"
+        f"accuracy={accuracy:.4f}"
     )
 
     wandb.log(
@@ -286,8 +283,7 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             f"{split_name}/loss": avg_loss,
             f"{split_name}/card_loss": avg_card,
             f"{split_name}/place_loss": avg_place,
-            f"{split_name}/acc_top1": acc_top1,
-            f"{split_name}/epoch": epoch,
+            f"{split_name}/accuracy": accuracy,
         }
     )
 
