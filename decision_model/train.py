@@ -391,7 +391,7 @@ if __name__ == "__main__":
     
     hyperparameter_config = {
         "batch_size": 16,
-        "num_epochs": 10,
+        "num_epochs": 5,
         "learning_rate": 6e-4,
         "weight_decay": 1e-2,
         "use_scheduler": True,
