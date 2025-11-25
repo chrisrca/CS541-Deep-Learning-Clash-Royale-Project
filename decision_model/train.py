@@ -31,7 +31,7 @@ def build_dataloaders(config, device):
     # hf_repo_type = config.get("hf_repo_type", "dataset")
     # parquet_paths = get_hf_parquet_local_paths(hf_repo_id, repo_type=hf_repo_type)
 
-    parquet_paths = ["./initial_training.parquet"]
+    parquet_paths = ["./initial_training_hand_elixir.parquet"]
     dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
 
     val_ratio = config.get("val_ratio", 0.1)
@@ -100,7 +100,7 @@ def build_model(config, device):
     return model.to(device)
 
 
-def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn, device, config, epoch):
+def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn, device, config, epoch, rolling_batch_losses=None, rolling_card_losses=None, rolling_place_losses=None):
     model.train()
     total_loss = 0.0
     total_card_loss = 0.0
@@ -108,9 +108,15 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
     total_batches = 0
 
     # Store per-batch losses to compute rolling averages for logging.
-    batch_losses = []
-    batch_card_losses = []
-    batch_place_losses = []
+    # Use persistent lists that carry over across epochs if provided
+    if rolling_batch_losses is None:
+        batch_losses = []
+        batch_card_losses = []
+        batch_place_losses = []
+    else:
+        batch_losses = rolling_batch_losses
+        batch_card_losses = rolling_card_losses
+        batch_place_losses = rolling_place_losses
 
     frames_per_sample = config["frames_per_sample"]
 
@@ -126,7 +132,8 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
         labels_card = batch["label_card"].long().to(device)
         labels_placement = batch["label_placement"].long().to(device).view(-1)
         
-        mask = batch["mask"].to(device)
+        playable_mask = batch["playable_mask"].to(device)
+        hand_mask = batch["hand_mask"].to(device)
 
         if frames.ndim == 4:
             frames = frames.unsqueeze(1)
@@ -136,7 +143,7 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
         frames = frames[:, -use_T:, ...]
 
         optimizer.zero_grad(set_to_none=True)
-        outputs = model(frames, numeric_features, action_mask=mask)
+        outputs = model(frames, numeric_features, playable_mask, hand_mask)
         card_logits = outputs["card_logits"]
         placement_logits = outputs["placement_logits"] # (B, num_cards, grid_cells)
 
@@ -199,7 +206,7 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
 
     print(
         f"[Train] epoch {epoch + 1} completed: "
-        f"loss={avg_loss:.4f}, card={avg_card:.4f}, place={avg_place:.4f}"
+        f"avg loss={avg_loss:.4f}, avg card={avg_card:.4f}, avg place={avg_place:.4f}"
     )
     return avg_loss, avg_card, avg_place
 
@@ -214,7 +221,6 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
     # Accuracy metrics for card prediction
     total_samples = 0
     total_correct_top1 = 0
-    total_correct_top5 = 0
 
     frames_per_sample = config["frames_per_sample"]
 
@@ -225,7 +231,8 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             labels_card = batch["label_card"].long().to(device)
             labels_placement = batch["label_placement"].long().to(device).view(-1)
             
-            mask = batch["mask"].to(device)
+            playable_mask = batch["playable_mask"].to(device)
+            hand_mask = batch["hand_mask"].to(device)
 
             if frames.ndim == 4:
                 frames = frames.unsqueeze(1)
@@ -234,7 +241,7 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             use_T = min(frames_per_sample, T)
             frames = frames[:, -use_T:, ...]
 
-            outputs = model(frames, numeric_features, action_mask=mask)
+            outputs = model(frames, numeric_features, playable_mask, hand_mask)
             card_logits = outputs["card_logits"]
             placement_logits = outputs["placement_logits"]
 
@@ -252,19 +259,11 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             total_place_loss += place_loss.item()
             total_batches += 1
 
-            # Top-1 and Top-5 accuracy for card prediction
+            # Top-1 accuracy for card prediction
             with torch.no_grad():
                 # Top-1
                 preds_top1 = card_logits.argmax(dim=1)
                 total_correct_top1 += (preds_top1 == labels_card).sum().item()
-
-                # Top-5 (handles case where num_classes < 5 by clamping k)
-                num_classes = card_logits.shape[1]
-                k = min(5, num_classes)
-                topk_vals, topk_idx = torch.topk(card_logits, k=k, dim=1)
-                # labels_card[:, None] to broadcast against topk_idx
-                correct_topk = (topk_idx == labels_card.unsqueeze(1)).any(dim=1)
-                total_correct_top5 += correct_topk.sum().item()
 
                 total_samples += labels_card.shape[0]
 
@@ -274,13 +273,12 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
 
     # Compute accuracies
     acc_top1 = total_correct_top1 / max(total_samples, 1)
-    acc_top5 = total_correct_top5 / max(total_samples, 1)
 
     # Print a concise summary line similar to training
     print(
         f"[Eval] {split_name} epoch {epoch + 1}: "
         f"loss={avg_loss:.4f}, card={avg_card:.4f}, place={avg_place:.4f}, "
-        f"acc_top1={acc_top1:.4f}, acc_top5={acc_top5:.4f}"
+        f"acc_top1={acc_top1:.4f}"
     )
 
     wandb.log(
@@ -289,7 +287,6 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             f"{split_name}/card_loss": avg_card,
             f"{split_name}/place_loss": avg_place,
             f"{split_name}/acc_top1": acc_top1,
-            f"{split_name}/acc_top5": acc_top5,
             f"{split_name}/epoch": epoch,
         }
     )
@@ -334,6 +331,11 @@ def run_training(game_config, hyperparameter_config, runtime_config):
 
         best_val_loss = float("inf")
 
+        # Persistent rolling average lists across epochs
+        rolling_batch_losses = []
+        rolling_card_losses = []
+        rolling_place_losses = []
+
         for epoch in range(config["num_epochs"]):
             train_loss, train_card, train_place = train_one_epoch(
                 model,
@@ -344,6 +346,9 @@ def run_training(game_config, hyperparameter_config, runtime_config):
                 device,
                 config,
                 epoch,
+                rolling_batch_losses,
+                rolling_card_losses,
+                rolling_place_losses,
             )
 
             val_loss, val_card, val_place = evaluate(

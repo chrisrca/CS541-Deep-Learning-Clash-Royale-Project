@@ -53,8 +53,30 @@ class ClashRoyaleDataset(Dataset):
         self.table = pa.concat_tables(tables)
         print(f"Loaded {self.table.num_rows} rows.")
 
+        # Filter out samples with invalid hand data
+        print("Filtering out samples with invalid hand data...")
+        self.valid_indices = []
+        for i in range(self.table.num_rows):
+            row_table = self.table.slice(i, 1)
+            data = row_table.to_pydict()
+
+            # Check if hand column has 4 entries
+            cards_in_hand = data["hand"][0]
+            if len(cards_in_hand) != 4:
+                continue
+
+            # Check if card played is in hand
+            card_played = data["card"][0]
+            if card_played != "none" and card_played not in cards_in_hand:
+                continue
+
+            # Keep sample if it has a valid hand
+            self.valid_indices.append(i)
+
+        print(f"Kept {len(self.valid_indices)} valid samples out of {self.table.num_rows} total samples.")
+
     def __len__(self) -> int:
-        return self.table.num_rows
+        return len(self.valid_indices)
 
     def __getitem__(self, idx: int):
         if idx < 0:
@@ -62,8 +84,11 @@ class ClashRoyaleDataset(Dataset):
         if idx < 0 or idx >= len(self):
             raise IndexError(idx)
 
+        # Map to actual table index
+        table_idx = self.valid_indices[idx]
+
         # Slicing the in-memory table is efficient
-        row_table = self.table.slice(idx, 1)
+        row_table = self.table.slice(table_idx, 1)
         data = row_table.to_pydict()
 
         # Decode the image from bytes
@@ -99,8 +124,6 @@ class ClashRoyaleDataset(Dataset):
 
         # Parse card name and convert to ID
         card_name = data["card"][0]
-        if isinstance(card_name, bytes):
-            card_name = card_name.decode('utf-8')
         
         if card_name in CARD_TO_ID:
             card_id = CARD_TO_ID[card_name]
@@ -112,27 +135,36 @@ class ClashRoyaleDataset(Dataset):
         tile_x = int(data["x"][0])
         tile_y = int(data["y"][0])
         
-        if "cards_in_hand" in data:
-            # cards_in_hand might be a list of strings/bytes
-            raw_hand = data["cards_in_hand"][0]
-            hand_ids = []
-            for c in raw_hand:
-                if isinstance(c, bytes):
-                    c = c.decode('utf-8')
-                if c in CARD_TO_ID:
-                    hand_ids.append(CARD_TO_ID[c])
-                else:
-                    raise ValueError(f"Unknown card name in hand: {c}")
+        hand_mask_ids = []
+        playable_mask_ids = []
+        for c in data["hand"][0]:
+            # Skip None values
+            if c is None:
+                continue
 
-            cards_in_hand = torch.tensor(hand_ids, dtype=torch.long)
-            # Allocate an extra slot for the No-Op action at index self.num_cards.
-            mask = torch.zeros(self.num_cards + 1, dtype=torch.float32)
-            mask[cards_in_hand] = 1.0
-            # No-Op is always legal
-            mask[-1] = 1.0
-        else:
-            # All cards plus No-Op are legal
-            mask = torch.ones(self.num_cards + 1, dtype=torch.float32)
+            # if card is not playable, it will be prefixed with "gray_"
+            # in this case, we should not include it in the mask
+            if c in CARD_TO_ID:
+                playable_mask_ids.append(CARD_TO_ID[c])
+            # however, we should still include it in the hand
+            # first, we need to strip the "gray_" prefix if it exists
+            if c.startswith("gray_"):
+                c = c[5:]
+            if c in CARD_TO_ID:
+                hand_mask_ids.append(CARD_TO_ID[c])
+            else:
+                raise ValueError(f"Unknown card name: {c}")
+
+        playable_mask_ids = torch.tensor(playable_mask_ids, dtype=torch.long)
+        # Allocate an extra slot for the No-Op action at index self.num_cards.
+        playable_mask = torch.zeros(self.num_cards + 1, dtype=torch.float32)
+        playable_mask[playable_mask_ids] = 1.0
+        # No-Op is always legal
+        playable_mask[-1] = 1.0
+
+        hand_mask_ids = torch.tensor(hand_mask_ids, dtype=torch.long)
+        hand_mask = torch.zeros(self.num_cards + 1, dtype=torch.float32)
+        hand_mask[hand_mask_ids] = 1.0
         
         elixir = float(data["elixir"][0]) if "elixir" in data else 10.0
         blue_left_princess_tower_health = int(data["blue_left_princess_tower_health"][0]) if "blue_left_princess_tower_health" in data else 3000
@@ -144,12 +176,12 @@ class ClashRoyaleDataset(Dataset):
 
         numeric_features = torch.tensor([elixir, blue_left_princess_tower_health, blue_right_princess_tower_health, blue_king_tower_health, red_left_princess_tower_health, red_right_princess_tower_health, red_king_tower_health], dtype=torch.float32)
 
-        label_card = torch.tensor(card_id, dtype=torch.int32) # equal to num_cards if no card was played
+        label_card = torch.tensor(card_id, dtype=torch.int32) # equal to self.num_cards if no card was played
         
         # If tile_x is invalid OR card is "none", treat as No-Op
         # "none" in CARD_TO_ID has an ID. 
         # However, "none" implies No-Op.
-        # If card_name == "none", we should map it to num_cards (No-Op class).
+        # If card_name == "none", we should map it to self.num_cards (No-Op class).
         
         if card_name == "none" or tile_x < 0 or tile_y < 0:
             tile_index = -1
@@ -161,7 +193,8 @@ class ClashRoyaleDataset(Dataset):
 
         return {
             "frames": frames,
-            "mask": mask,
+            "playable_mask": playable_mask,
+            "hand_mask": hand_mask,
             "numeric_features": numeric_features,
             "label_card": label_card,
             "label_placement": label_placement,

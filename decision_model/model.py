@@ -5,13 +5,14 @@ Requirements:
     torch, torchvision
 
 Model summary:
-    - Backbone: MobileNetV2 for efficient feature extraction
+    - Backbone: MobileNetV2 for efficient feature numericction
     - Input:
         frames: (B, T, C, H, W) float tensor, normalized to backbone's expectation
-        extra_feats: (B, extra_dim) float tensor (per-sample, only current frame info)
-        action_mask: optional (B, num_cards) boolean or 0/1 tensor where True/1 means legal
+        numeric_feats: (B, numeric_feat_dim) float tensor (per-sample, only current frame info)
+        playable_mask: (B, len(ALL_CARDS) + 1) boolean or 0/1 tensor where True/1 means legal
+        hand_mask: (B, len(ALL_CARDS) + 1) boolean or 0/1 tensor where True/1 means in hand
     - Outputs:
-        card_logits: (B, num_cards) raw logits (masked if action_mask provided)
+        card_logits: (B, num_cards) raw logits (masked by playable_mask)
         placement_logits: (B, grid_h * grid_w) raw logits over grid cells
         placement_map: (B, grid_h, grid_w) raw logits reshaped
 """
@@ -158,7 +159,7 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         """
         Args:
             num_cards: number of card classes
-            extra_feat_dim: dimensionality of the per-frame extra feature vector (elixir, tower HPs, etc.)
+            numeric_feat_dim: dimensionality of the per-frame numeric feature vector (elixir, tower HPs, etc.)
             grid_h, grid_w: output placement grid resolution
             convlstm_hidden: hidden channels for ConvLSTM
             pretrained_backbone_weights: MobileNet_V2_Weights to use (e.g., MobileNet_V2_Weights.DEFAULT) or None for no pretrained weights
@@ -169,7 +170,7 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.grid_cells = grid_h * grid_w
-        self.extra_feat_dim = numeric_feat_dim
+        self.numeric_feat_dim = numeric_feat_dim
 
         # backbone
         self.backbone = MobileNetV2Backbone(weights=pretrained_backbone_weights, proj_out_channels=backbone_proj_channels)
@@ -181,19 +182,20 @@ class ConvLSTMClashRoyaleModel(nn.Module):
 
         # card head:
         # global pooling of final hidden map -> vector (B, convlstm_hidden)
-        # then concat extra_feats (B, extra_feat_dim) -> MLP -> num_cards logits
+        # then concat numeric_feats (B, numeric_feat_dim) and hand_mask (B, num_cards) -> MLP -> num_cards logits
         card_head_hidden = max(128, convlstm_hidden)
+        hand_mask_dim = num_cards  # hand_mask has shape (B, num_cards)
         self.card_head_mlp = nn.Sequential(
-            nn.LayerNorm(convlstm_hidden + numeric_feat_dim),
-            nn.Linear(convlstm_hidden + numeric_feat_dim, card_head_hidden),
+            nn.LayerNorm(convlstm_hidden + numeric_feat_dim + hand_mask_dim),
+            nn.Linear(convlstm_hidden + numeric_feat_dim + hand_mask_dim, card_head_hidden),
             nn.GELU(),
             nn.Linear(card_head_hidden, num_cards),
         )
 
         # placement head:
-        # take final hidden map (B, convlstm_hidden, Hf, Wf), concat broadcasted extra_feats,
+        # take final hidden map (B, convlstm_hidden, Hf, Wf), concat broadcasted numeric_feats,
         # a small conv decoder and finally produce grid logits
-        # We'll first reduce convlstm_hidden -> mid channels, concat extra_feat broadcast as channels,
+        # We'll first reduce convlstm_hidden -> mid channels, concat numeric_feat broadcast as channels,
         # then use conv layers -> produce 1-channel logits -> resize to (grid_h, grid_w)
         place_mid_ch = 128
         self.place_reduce_conv = nn.Sequential(
@@ -202,7 +204,7 @@ class ConvLSTMClashRoyaleModel(nn.Module):
             nn.GELU(),
         )
 
-        # after broadcasting extra_feats, we'll have (place_mid_ch + extra_feat_dim) channels
+        # after broadcasting numeric_feats, we'll have (place_mid_ch + numeric_feat_dim) channels
         fused_ch = place_mid_ch + numeric_feat_dim
         self.place_conv_block = nn.Sequential(
             nn.Conv2d(fused_ch, fused_ch, kernel_size=3, padding=1),
@@ -216,12 +218,13 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         # We output 'num_cards' channels: one placement map for each card type.
         self.place_logits = nn.Conv2d(fused_ch // 2, num_cards, kernel_size=1)
 
-    def forward(self, frames: torch.Tensor, extra_feats: torch.Tensor, action_mask: Optional[torch.Tensor] = None):
+    def forward(self, frames: torch.Tensor, numeric_feats: torch.Tensor, playable_mask: torch.Tensor, hand_mask: torch.Tensor):
         """
         Args:
             frames: (B, T, C, H, W)
-            extra_feats: (B, extra_feat_dim)
-            action_mask: optional (B, num_cards) boolean or 0/1 tensor where True=legal
+            numeric_feats: (B, numeric_feat_dim)
+            playable_mask: (B, len(ALL_CARDS) + 1) boolean or 0/1 tensor where True=legal
+            hand_mask: (B, len(ALL_CARDS) + 1) boolean or 0/1 tensor where True=in hand
         Returns:
             dict with:
              - card_logits: (B, num_cards)
@@ -248,27 +251,20 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         # 3) card head
         # global-pool h_last -> (B, convlstm_hidden)
         pooled = F.adaptive_avg_pool2d(h_last, output_size=(1, 1)).view(B, -1)  # (B, convlstm_hidden)
-        # concat extra feats
-        card_input = torch.cat([pooled, extra_feats], dim=1)  # (B, convlstm_hidden + extra_feat_dim)
+        # concat numeric feats and hand_mask
+        card_input = torch.cat([pooled, numeric_feats, hand_mask], dim=1)  # (B, convlstm_hidden + numeric_feat_dim + hand_mask_dim)
         card_logits = self.card_head_mlp(card_input)  # (B, num_cards)
 
-        # apply mask if provided (mask True = legal). set illegal logits to large negative
-        if action_mask is not None:
-            # ensure boolean and on correct device
-            mask_bool = action_mask.to(device=card_logits.device, dtype=torch.bool)
-            large_neg = -1e9
-            masked_logits = card_logits.clone()
-            # mask_bool shape maybe (B, num_cards)
-            masked_logits[~mask_bool] = large_neg
-            card_logits = masked_logits
+        # apply playable mask
+        card_logits[~playable_mask.bool()] = -100.0
 
         # 4) placement head
         # reduce channels
         x = self.place_reduce_conv(h_last)  # (B, place_mid_ch, Hf, Wf)
-        # broadcast extra_feats into spatial map
-        # expand extra_feats to (B, extra_feat_dim, Hf, Wf)
-        extra_spatial = extra_feats.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, Hf, Wf)
-        fused = torch.cat([x, extra_spatial], dim=1)  # (B, place_mid_ch + extra_feat_dim, Hf, Wf)
+        # broadcast numeric_feats into spatial map
+        # expand numeric_feats to (B, numeric_feat_dim, Hf, Wf)
+        numeric_spatial = numeric_feats.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, Hf, Wf)
+        fused = torch.cat([x, numeric_spatial], dim=1)  # (B, place_mid_ch + numeric_feat_dim, Hf, Wf)
         x = self.place_conv_block(fused)  # (B, fused_ch//2, Hf, Wf)
         
         # Output (B, num_cards, Hf, Wf)
@@ -290,52 +286,3 @@ class ConvLSTMClashRoyaleModel(nn.Module):
             "placement_map": logits_map_resized,
             "convlstm_hidden_seq": h_seq,  # (B, T, convlstm_hidden, Hf, Wf)
         }
-
-
-# -------------------------
-# Example usage + loss suggestions
-# -------------------------
-if __name__ == "__main__":
-    # toy example
-    B, T, C, H, W = 4, 8, 3, 224, 224
-    num_cards = 8 # Max 8
-    extra_feat_dim = 7 # elixir, blue left tower health, blue right tower health, blue king tower health,
-                       # red left tower health, red right tower health, red king tower health
-    grid_h, grid_w = 32, 18
-
-    model = ConvLSTMClashRoyaleModel(
-        num_cards=num_cards,
-        numeric_feat_dim=extra_feat_dim,
-        grid_h=grid_h,
-        grid_w=grid_w,
-        convlstm_hidden=128,
-        pretrained_backbone_weights=None,
-        backbone_proj_channels=128,
-    )
-
-    dummy_frames = torch.randn(B, T, C, H, W)
-    dummy_extra = torch.randn(B, extra_feat_dim)
-    # action mask: example
-    action_mask = torch.zeros(B, num_cards, dtype=torch.bool)
-    action_mask[0, :4] = 1  # only first 4 legal for batch item 0
-
-    outputs = model(dummy_frames, dummy_extra, action_mask=action_mask)
-    print("card_logits:", outputs["card_logits"].shape)        # (B, num_cards)
-    print("placement_logits:", outputs["placement_logits"].shape)  # (B, grid_h * grid_w)
-    print("placement_map:", outputs["placement_map"].shape)    # (B, grid_h, grid_w)
-    print("convlstm_hidden_seq:", outputs["convlstm_hidden_seq"].shape)  # (B, T, ch, Hf, Wf)
-
-    # Example losses:
-    # Card loss: CrossEntropyLoss
-    card_targets = torch.randint(low=0, high=num_cards, size=(B,))
-    card_loss_fn = nn.CrossEntropyLoss()
-    card_loss = card_loss_fn(outputs["card_logits"], card_targets)
-
-    # Placement loss: CrossEntropyLoss over grid cells
-    placement_targets = torch.randint(low=0, high=grid_h * grid_w, size=(B,))
-    place_loss_fn = nn.CrossEntropyLoss()
-    place_loss = place_loss_fn(outputs["placement_logits"], placement_targets)
-
-    total_loss = card_loss + place_loss
-    total_loss.backward()
-    print("backward OK")
