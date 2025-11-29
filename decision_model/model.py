@@ -101,7 +101,7 @@ class ConvLSTM(nn.Module):
             h_seq.append(h)
 
         h_seq = torch.stack(h_seq, dim=1)  # (B, T, C_h, H, W)
-        return h_seq, (h, c)
+        return h_seq, (h, c) # type: ignore
 
 
 # -------------------------

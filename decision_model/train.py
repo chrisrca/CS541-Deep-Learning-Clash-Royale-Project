@@ -31,7 +31,7 @@ def build_dataloaders(config, device):
     # hf_repo_type = config.get("hf_repo_type", "dataset")
     # parquet_paths = get_hf_parquet_local_paths(hf_repo_id, repo_type=hf_repo_type)
 
-    parquet_paths = ["./initial_training_hand_elixir.parquet"]
+    parquet_paths = ["./training.parquet"]
     dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
 
     val_ratio = config.get("val_ratio", 0.1)
@@ -172,16 +172,16 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
         total_batches += 1
 
         batch_losses.append(loss.item())
-        batch_card_losses.append(card_loss.item())
-        batch_place_losses.append(place_loss.item())
+        batch_card_losses.append(card_loss.item()) # type: ignore
+        batch_place_losses.append(place_loss.item()) # type: ignore
 
         if (batch_idx + 1) % config["log_every"] == 0:
             # Compute rolling average over the last N batches
             window = config["rolling_average_window"]
             start_idx = max(0, len(batch_losses) - window)
             window_losses = batch_losses[start_idx:]
-            window_card_losses = batch_card_losses[start_idx:]
-            window_place_losses = batch_place_losses[start_idx:]
+            window_card_losses = batch_card_losses[start_idx:] # type: ignore
+            window_place_losses = batch_place_losses[start_idx:] # type: ignore
             avg_window_loss = sum(window_losses) / max(len(window_losses), 1)
             avg_window_card = sum(window_card_losses) / max(len(window_card_losses), 1)
             avg_window_place = sum(window_place_losses) / max(len(window_place_losses), 1)

@@ -12,9 +12,9 @@ ALL_CARDS = [
     "bats", "battle_ram", "berserker", "bomb_tower", "bomber", "boss_bandit", "bowler", "bush_goblin", 
     "caged_goblin", "cannon", "cannon_cart", "clone", "dark_prince", "dart_goblin", "e_barbs", "e_wiz", 
     "earthquake", "electro_dragon", "electro_giant", "electro_spirit", "elixir_golem", "elixir_pump", "empty", 
-    "evo_archers", "evo_baby_dragon", "evo_barbs", "evo_bats", "evo_battle_ram", "evo_bomber", "evo_cannon", 
+    "evo_archers", "evo_baby_dragon", "evo_barbs", "evo_bats", "evo_battle_ram", "evo_bomber", "evo_cannon", "evo_dart_goblin",
     "evo_electro_dragon", "evo_executioner", "evo_firecracker", "evo_ghost", "evo_goblin_barrel", "evo_goblin_cage", 
-    "evo_goblin_drill", "evo_goblin_giant", "evo_ice_spirit", "evo_inferno_dragon", "evo_lumberjack", "evo_mortar", 
+    "evo_goblin_drill", "evo_goblin_giant", "evo_ice_spirit", "evo_inferno_dragon", "evo_knight", "evo_lumberjack", "evo_mortar", 
     "evo_musketeer", "evo_royal_giant", "evo_royal_hogs", "evo_royal_recruit", "evo_skele_barrel", 
     "evo_skeletion_army", "evo_skeletons", "evo_snowball", "evo_tesla_coil", "evo_valk", "evo_wallbreakers", 
     "evo_witch", "evo_wizard", "evo_zap", "executioner", "fire_spirit", "fireball", "firecracker", "fisherman", 
@@ -26,13 +26,30 @@ ALL_CARDS = [
     "miner", "mini_pekka", "minion_horde", "minions", "monk", "mortar", "mother_witch", "musketeer", "musketeers", 
     "night_witch", "pekka", "phoenix", "poison", "prince", "princess", "rage", "ram_rider", "rascals", "rocket", 
     "royal_delivery", "royal_giant", "royal_hogs", "royal_recruits", "skarmy", "skele_barrel", "skeleton_dragons", 
-    "skeleton_king", "skeletons", "snowball", "sparky", "spear_goblins", "tesla_coil", "tombstone", "tornado", 
-    "valk", "vines", "wallbreakers", "witch", "xbow", "zap", "zappies"
+    "skeleton_king", "skeletons", "snowball", "sparky", "spear_goblins", "spirit_empress", "spirit_empress_dragon", "tesla_coil", "tombstone", "tornado", 
+    "valk", "vines", "void", "wallbreakers", "witch", "wizard", "xbow", "zap", "zappies"
 ]
 
 # Sort to ensure consistent ID mapping
 ALL_CARDS.sort()
 CARD_TO_ID = {name: i for i, name in enumerate(ALL_CARDS)}
+
+# Grid discretization parameters (pixel to tile conversion)
+# These define the playable area within the image
+IMAGE_WIDTH = 432
+IMAGE_HEIGHT = 680
+Y_OFFSET_TOP = 62
+Y_OFFSET_BOTTOM = 7
+X_OFFSET_LEFT = 0
+X_OFFSET_RIGHT = 0
+NUM_COLS = 18
+NUM_ROWS = 32
+
+# Calculate tile dimensions from offsets
+GRID_WIDTH = IMAGE_WIDTH - X_OFFSET_LEFT - X_OFFSET_RIGHT
+GRID_HEIGHT = IMAGE_HEIGHT - Y_OFFSET_TOP - Y_OFFSET_BOTTOM
+TILE_WIDTH = GRID_WIDTH / NUM_COLS
+TILE_HEIGHT = GRID_HEIGHT / NUM_ROWS
 
 class ClashRoyaleDataset(Dataset):
     def __init__(self, files, grid_w, grid_h, num_cards):
@@ -56,22 +73,28 @@ class ClashRoyaleDataset(Dataset):
         # Filter out samples with invalid hand data
         print("Filtering out samples with invalid hand data...")
         self.valid_indices = []
-        for i in range(self.table.num_rows):
-            row_table = self.table.slice(i, 1)
-            data = row_table.to_pydict()
+        
+        # Check if hand column is missing from the table entirely
+        if "hand" not in self.table.column_names:
+            print("WARNING: Hand data is missing from the dataset. Including all samples. Applying no masking.")
+            self.valid_indices = list(range(self.table.num_rows))
+        else:
+            for i in range(self.table.num_rows):
+                row_table = self.table.slice(i, 1)
+                data = row_table.to_pydict()
 
-            # Check if hand column has 4 entries
-            cards_in_hand = data["hand"][0]
-            if len(cards_in_hand) != 4:
-                continue
+                # Check if hand column has 4 entries
+                cards_in_hand = data["hand"][0]
+                if len(cards_in_hand) != 4:
+                    continue
 
-            # Check if card played is in hand
-            card_played = data["card"][0]
-            if card_played != "none" and card_played not in cards_in_hand:
-                continue
+                # Check if card played is in hand
+                card_played = data["card"][0]
+                if card_played != "none" and card_played not in cards_in_hand:
+                    continue
 
-            # Keep sample if it has a valid hand
-            self.valid_indices.append(i)
+                # Keep sample if it has a valid hand
+                self.valid_indices.append(i)
 
         print(f"Kept {len(self.valid_indices)} valid samples out of {self.table.num_rows} total samples.")
 
@@ -135,36 +158,52 @@ class ClashRoyaleDataset(Dataset):
         tile_x = int(data["x"][0])
         tile_y = int(data["y"][0])
         
-        hand_mask_ids = []
-        playable_mask_ids = []
-        for c in data["hand"][0]:
-            # Skip None values
-            if c is None:
-                continue
+        # Convert pixel coordinates to tile coordinates
+        pixel_x = tile_x
+        pixel_y = tile_y
+        tile_x = int((pixel_x - X_OFFSET_LEFT) / TILE_WIDTH)
+        tile_y = int((pixel_y - Y_OFFSET_TOP) / TILE_HEIGHT)
+        
+        # Clamp to valid range
+        tile_x = max(0, min(tile_x, NUM_COLS - 1))
+        tile_y = max(0, min(tile_y, NUM_ROWS - 1))
+        
+        # Check if hand column is missing
+        if "hand" not in data:
+            # Mark all cards as in hand and all cards as playable
+            playable_mask = torch.ones(self.num_cards + 1, dtype=torch.float32)
+            hand_mask = torch.ones(self.num_cards + 1, dtype=torch.float32)
+        else:
+            hand_mask_ids = []
+            playable_mask_ids = []
+            for c in data["hand"][0]:
+                # Skip None values
+                if c is None:
+                    continue
 
-            # if card is not playable, it will be prefixed with "gray_"
-            # in this case, we should not include it in the mask
-            if c in CARD_TO_ID:
-                playable_mask_ids.append(CARD_TO_ID[c])
-            # however, we should still include it in the hand
-            # first, we need to strip the "gray_" prefix if it exists
-            if c.startswith("gray_"):
-                c = c[5:]
-            if c in CARD_TO_ID:
-                hand_mask_ids.append(CARD_TO_ID[c])
-            else:
-                raise ValueError(f"Unknown card name: {c}")
+                # if card is not playable, it will be prefixed with "gray_"
+                # in this case, we should not include it in the mask
+                if c in CARD_TO_ID:
+                    playable_mask_ids.append(CARD_TO_ID[c])
+                # however, we should still include it in the hand
+                # first, we need to strip the "gray_" prefix if it exists
+                if c.startswith("gray_"):
+                    c = c[5:]
+                if c in CARD_TO_ID:
+                    hand_mask_ids.append(CARD_TO_ID[c])
+                else:
+                    raise ValueError(f"Unknown card name: {c}")
 
-        playable_mask_ids = torch.tensor(playable_mask_ids, dtype=torch.long)
-        # Allocate an extra slot for the No-Op action at index self.num_cards.
-        playable_mask = torch.zeros(self.num_cards + 1, dtype=torch.float32)
-        playable_mask[playable_mask_ids] = 1.0
-        # No-Op is always legal
-        playable_mask[-1] = 1.0
+            playable_mask_ids = torch.tensor(playable_mask_ids, dtype=torch.long)
+            # Allocate an extra slot for the No-Op action at index self.num_cards.
+            playable_mask = torch.zeros(self.num_cards + 1, dtype=torch.float32)
+            playable_mask[playable_mask_ids] = 1.0
+            # No-Op is always legal
+            playable_mask[-1] = 1.0
 
-        hand_mask_ids = torch.tensor(hand_mask_ids, dtype=torch.long)
-        hand_mask = torch.zeros(self.num_cards + 1, dtype=torch.float32)
-        hand_mask[hand_mask_ids] = 1.0
+            hand_mask_ids = torch.tensor(hand_mask_ids, dtype=torch.long)
+            hand_mask = torch.zeros(self.num_cards + 1, dtype=torch.float32)
+            hand_mask[hand_mask_ids] = 1.0
         
         elixir = float(data["elixir"][0]) if "elixir" in data else 10.0
         blue_left_princess_tower_health = int(data["blue_left_princess_tower_health"][0]) if "blue_left_princess_tower_health" in data else 3000
@@ -183,7 +222,7 @@ class ClashRoyaleDataset(Dataset):
         # However, "none" implies No-Op.
         # If card_name == "none", we should map it to self.num_cards (No-Op class).
         
-        if card_name == "none" or tile_x < 0 or tile_y < 0:
+        if card_name == "none" or pixel_x < 0 or pixel_y < 0:
             tile_index = -1
         else:
             tile_index = tile_y * self.grid_w + tile_x
