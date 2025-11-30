@@ -18,7 +18,9 @@ class CRElement:
             return self.y_start() + self.size[1]
 
     elixir = BoundingBox(origin=(103 - 84,823 + 97), size=(30,25))
+    elixir_match = BoundingBox(origin=(145,916), size=(30,25))
     elixir_bar = BoundingBox(origin=(48,839+ 97), size=(418+54,3))
+    elixir_bar_match = BoundingBox(origin=(145,941), size=(374,3))
     arena = BoundingBox(origin=(57,137), size=(428,683))
 
     cards_in_hand = []
@@ -54,8 +56,8 @@ class CRElement:
             return [CRElement.cut_to_fit(image=screenshot, box=bounding_box) for bounding_box in CRElement.cards_in_hand]
 
     @staticmethod
-    def get_elixir_pic(screenshot: np.ndarray) -> np.ndarray:
-        return CRElement.cut_to_fit(screenshot, CRElement.elixir)
+    def get_elixir_pic(screenshot: np.ndarray, is_match: bool = False) -> np.ndarray:
+        return CRElement.cut_to_fit(screenshot, CRElement.elixir if not is_match else CRElement.elixir_match)
     
     @staticmethod
     def quantize(frame: np.ndarray, levels=4, display=False) -> np.ndarray:

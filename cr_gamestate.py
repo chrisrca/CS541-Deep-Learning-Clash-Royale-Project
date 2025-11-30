@@ -27,19 +27,19 @@ class CRGameState:
         return count/max
     
     @staticmethod
-    def _fractional_elixir(screenshot: np.ndarray):
+    def _fractional_elixir(screenshot: np.ndarray, is_match=False):
         """
         Returns:
             float: Estimated elixir between whole-number increments.
         """
         screenshot = CRElement.blur(screenshot, (3,3))
-        elixir_bar = CRElement.cut_to_fit(screenshot, CRElement.elixir_bar)
+        elixir_bar = CRElement.cut_to_fit(screenshot, CRElement.elixir_bar if not is_match else CRElement.elixir_bar_match)
 
         return CRGameState._count_proportion_matching_pixels(
             image=elixir_bar,
-            target_color=np.array([132, 71, 78]),
+            target_color=np.array([132, 71, 78]) if not is_match else np.array([212, 33, 206]),
             tolerance=11,
-            max=135
+            max=135 if not is_match else None
         )
     
     @staticmethod
@@ -72,15 +72,15 @@ class CRGameState:
         return max(proportion_matching_pixels_left, proportion_matching_pixels_right) > confidence
     
     @staticmethod
-    def current_elixir(screenshot: np.ndarray, elixir_images: list[CRElement.Elixir], confidence: float = 0.7):    
+    def current_elixir(screenshot: np.ndarray, elixir_images: list[CRElement.Elixir], confidence: float = 0.7, is_match=False):    
         best_score, best_match = CRElement.best_match(
-            template=CRElement.get_elixir_pic(screenshot),
+            template=CRElement.get_elixir_pic(screenshot, is_match=is_match),
             labelled_image_collection={elixir.value: elixir.BGR for elixir in elixir_images},
             shearing=(2,2)
         )
 
         if(best_score > confidence):
-            return best_match + CRGameState._fractional_elixir(screenshot)
+            return best_match + CRGameState._fractional_elixir(screenshot, is_match)
         else:
             return None
     
