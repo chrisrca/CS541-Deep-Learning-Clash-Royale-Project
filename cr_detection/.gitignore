@@ -1,0 +1,4 @@
+*.mp4
+venv/
+potential_new_cards/
+HUGGING_KEY.txt
