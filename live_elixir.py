@@ -11,19 +11,48 @@ ports = mumu.scan_ports()
 serials = mumu.connect_all(ports)
 serial = serials[0]
 
+# Load elixir templates
 elixir_templates = [CRElement.Elixir(f"{i}.png") for i in range(11)]
+
+# Load card templates
+card_templates = {
+    CRElement.Card(filename).name: CRElement.Card(filename) 
+    for filename in os.listdir("cr_detection/cards/")
+}
+
+# Track previous line length
+prev_len = 0
 
 while True:
     frame = mumu.get_screen(serial)
+    
+    # Get current elixir
     elixir = CRGameState.current_elixir(
         screenshot=frame,
         elixir_images=elixir_templates,
         confidence=0.7
     )
 
-    if elixir is not None:
-        print(f"\rElixir:{elixir:5.2f}", end="", flush=True)
-    else:
-        print(f"\rElixir: -.--", end="", flush=True)
+    # Get cards in hand
+    cards = CRGameState.cards_in_hand(
+        screenshot=frame,
+        card_images=card_templates,
+        current_elixir=elixir,
+        confidence_color=0.6,
+        confidence_gray=0.55
+    )
+
+    # Print status
+    elixir_str = f"{elixir:5.2f}" if elixir is not None else "-.--"
+    cards_str = " | ".join([card if card else "empty" for card in cards])
+    
+    output = f"Elixir: {elixir_str} | Cards: {cards_str}"
+    
+    # Add spaces only if current output is shorter than previous
+    if len(output) < prev_len:
+        output += " " * (prev_len - len(output))
+    prev_len = len(output)
+    
+    print(f"\r{output}", end="", flush=True)
 
     time.sleep(0.08)
