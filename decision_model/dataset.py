@@ -71,30 +71,38 @@ class ClashRoyaleDataset(Dataset):
         print(f"Loaded {self.table.num_rows} rows.")
 
         # Filter out samples with invalid hand data
-        print("Filtering out samples with invalid hand data...")
+        print("Filtering out samples with invalid data...")
         self.valid_indices = []
         
         # Check if hand column is missing from the table entirely
         if "hand" not in self.table.column_names:
-            print("WARNING: Hand data is missing from the dataset. Including all samples. Applying no masking.")
-            self.valid_indices = list(range(self.table.num_rows))
-        else:
-            for i in range(self.table.num_rows):
-                row_table = self.table.slice(i, 1)
-                data = row_table.to_pydict()
+            print("WARNING: Hand data is missing from the dataset. Applying no masking.")
 
+        for i in range(self.table.num_rows):
+            row_table = self.table.slice(i, 1)
+            data = row_table.to_pydict()
+            card_played = data["card"][0]
+
+            # Validate hand data if present
+            if "hand" in data:
                 # Check if hand column has 4 entries
                 cards_in_hand = data["hand"][0]
                 if len(cards_in_hand) != 4:
                     continue
 
                 # Check if card played is in hand
-                card_played = data["card"][0]
                 if card_played != "none" and card_played not in cards_in_hand:
                     continue
 
-                # Keep sample if it has a valid hand
-                self.valid_indices.append(i)
+            # Exclude samples where card was played but placement is unknown (-1, -1)
+            # This indicates low confidence in placement detection
+            x_val = int(data["x"][0])
+            y_val = int(data["y"][0])
+            if card_played != "none" and x_val == -1 and y_val == -1:
+                continue
+
+            # Keep sample if it has a valid hand
+            self.valid_indices.append(i)
 
         print(f"Kept {len(self.valid_indices)} valid samples out of {self.table.num_rows} total samples.")
 

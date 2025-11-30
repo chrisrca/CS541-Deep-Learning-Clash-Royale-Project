@@ -45,7 +45,7 @@ def load_model(checkpoint_path, config, device):
 
 def get_validation_sample(config):
     """Load dataset and get the first sample from validation set."""
-    parquet_paths = ["./training.parquet"]
+    parquet_paths = ["./new_arena_placement.parquet"]
     dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
     
     # Split dataset the same way as training
