@@ -22,11 +22,18 @@ class CRElement:
     arena = BoundingBox(origin=(57,137), size=(428,683))
 
     cards_in_hand = []
+    cards_in_hand_match = []
     card_space = 5
+    card_space_match = 13
     card = BoundingBox(origin=(86 - 14, 737 + 97), size=(66,81))
+    card_match = BoundingBox(origin=(127, 801), size=(85, 106))
     for i in range(4):
         card_origin_offset = (card.origin[0] + (card.size[0] + card_space) * i, card.origin[1])
         cards_in_hand.append(BoundingBox(origin=card_origin_offset, size=card.size))
+        if i == 2:
+            card_space_match += 3
+        card_origin_offset = (card_match.origin[0] + (card_match.size[0] + card_space_match) * i, card_match.origin[1])
+        cards_in_hand_match.append(BoundingBox(origin=card_origin_offset, size=card_match.size))
 
     @staticmethod
     def is_grayscale(image):
@@ -38,8 +45,13 @@ class CRElement:
         return image[box.y_start():box.y_end(),box.x_start():box.x_end()]
     
     @staticmethod
-    def get_images_in_hand(screenshot: np.ndarray) -> list[np.ndarray]:
-        return [CRElement.cut_to_fit(image=screenshot, box=bounding_box) for bounding_box in CRElement.cards_in_hand]
+    def get_images_in_hand(screenshot: np.ndarray, is_match: bool = False) -> list[np.ndarray]:
+        if is_match:
+            cards = [CRElement.cut_to_fit(image=screenshot, box=bounding_box) for bounding_box in CRElement.cards_in_hand_match]
+            cards = [cv2.resize(card, (66,81), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR) for card in cards] # TODO use bounding box
+            return cards
+        else:
+            return [CRElement.cut_to_fit(image=screenshot, box=bounding_box) for bounding_box in CRElement.cards_in_hand]
 
     @staticmethod
     def get_elixir_pic(screenshot: np.ndarray) -> np.ndarray:

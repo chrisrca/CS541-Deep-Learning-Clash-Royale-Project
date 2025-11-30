@@ -43,22 +43,24 @@ class CRDataset:
         replays = [item.split(self.url)[1] for item in replays]
         return replays
 
-    def _get_table_from_db(self, replay) -> pq.ParquetDataset:
-        with open('HUGGING_KEY.txt', 'r') as f:
-            path = hf_hub_download(repo_id=self.repo_id, filename=f"{replay}/frames.parquet", repo_type="dataset", token=f.read())
+    def _get_table_from_db(self, replay, download_only = False, target_dir = None, path = None) -> pq.ParquetDataset:
+        if path is None:
+            with open('HUGGING_KEY.txt', 'r') as f:
+                path = hf_hub_download(repo_id=self.repo_id, filename=f"{replay}/frames.parquet", repo_type="dataset", token=f.read(), cache_dir=target_dir)
+        if(not download_only):
             return pq.read_table(path)
     
-    def load_replay(self, replay_name: str, clear_huggingface = False) -> tuple[list[np.ndarray], list[CRElement.Card], bool]:
+    def load_replay(self, replay_name: str, clear_huggingface = False, cull_selected_cards = True, local_pq_path = None) -> tuple[list[np.ndarray], list[CRElement.Card], bool]:
         """
 
         """
-        parquet = self._get_table_from_db(replay_name)
+        parquet = self._get_table_from_db(replay_name, path = local_pq_path)
         column = parquet["image"]
         dataset = [item.as_py()['bytes'] for item in column]
         dataset = [cv2.cvtColor(np.array(Image.open(BytesIO(img))), cv2.COLOR_RGB2BGR) for img in dataset]
-        deck, all_identified = self._find_cards_in_video(dataset, cull_selected_cards=False) # Set to true to scrape for new card images
+        deck, all_identified = self._find_cards_in_video(dataset, cull_selected_cards=cull_selected_cards) # Set to true to scrape for new card images
         replay_metadata = self.get_replay_from_manifest(replay_name)
-        if replay_metadata == None:
+        if replay_metadata == None or not ('cards_identified' in replay_metadata.keys()):
             self.manifest.append({'replay': replay_name, 'cards_identified': True})
             if(clear_huggingface):
                 shutil.rmtree("C:\\Users\\0dps1\\.cache\\huggingface\\hub\\datasets--chrisrca--clash-royale-tv-replays\\blobs")
@@ -134,13 +136,17 @@ class CRDataset:
         keep = count > 20 or not in_window
         return keep
     
-    def movement_highlight(backdrop: np.ndarray, replay: list[np.ndarray]):
-        arena_start = CRElement.cut_to_fit(replay[0], CRElement.arena) # TODO have eacha arena have a template backdrop
+    @staticmethod
+    def movement_highlight(backdrop: np.ndarray, keep_template: np.ndarray, replay: list[np.ndarray]):
+        arena_start = backdrop
+        gray = cv2.cvtColor(keep_template, cv2.COLOR_BGR2GRAY)
+        keep_mask = (gray < 5).astype(np.uint8) * 255
+        discard_mask = (gray > 250).astype(np.uint8) * 255
 
         h0, w0 = arena_start.shape[:2]
         writer = cv2.VideoWriter("differences.mp4", 0, 10, (w0, h0), isColor=True)
         for image in replay:
-            snipped = CRElement.cut_to_fit(image, CRElement.arena)
+            snipped = image
             diff = cv2.absdiff(snipped, arena_start)  # per-pixel absolute difference
             mask = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)  # collapse to grayscale if color
             _, mask = cv2.threshold(mask, 55, 255, cv2.THRESH_BINARY)  # highlight significant differences
@@ -156,6 +162,10 @@ class CRDataset:
 
             # Option 2: show only changed regions
             changed_regions = cv2.bitwise_and(snipped, snipped, mask=mask_clean)
+
+            # manually draw over always-on regions
+            cv2.copyTo(image, keep_mask, changed_regions)
+            changed_regions[discard_mask > 0] = 0
             writer.write(changed_regions)
 
         writer.release()

@@ -39,7 +39,8 @@ while True:
         card_images=card_templates,
         current_elixir=elixir,
         confidence_color=0.6,
-        confidence_gray=0.55
+        confidence_gray=0.55,
+        is_match=True
     )
 
     # Print status

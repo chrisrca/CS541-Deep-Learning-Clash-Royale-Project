@@ -85,8 +85,8 @@ class CRGameState:
             return None
     
     @staticmethod
-    def cards_in_hand(screenshot: np.ndarray, card_images: dict[str, CRElement.Card], current_elixir: float, confidence_color: float = 0.6, confidence_gray = 0.55) -> list[CRElement.Card]:    
-        cards_h = CRElement.get_images_in_hand(screenshot)
+    def cards_in_hand(screenshot: np.ndarray, card_images: dict[str, CRElement.Card], current_elixir: float, confidence_color: float = 0.6, confidence_gray = 0.55, is_match = False) -> list[CRElement.Card]:    
+        cards_h = CRElement.get_images_in_hand(screenshot, is_match)
         detected_hand = []
         for card_h in cards_h:
             is_gray = CRElement.is_grayscale(card_h)
