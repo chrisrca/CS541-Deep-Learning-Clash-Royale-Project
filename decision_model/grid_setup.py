@@ -11,7 +11,7 @@ NUM_ROWS = 32
 NUM_COLS = 18
 
 # Load the parquet file
-table = pq.read_table("./training.parquet")
+table = pq.read_table("./new_arena_placement.parquet")
 
 # Get the first row
 row_table = table.slice(0, 1)

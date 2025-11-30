@@ -20,7 +20,7 @@ config = {
 
 # Create ID to card name mapping
 ID_TO_CARD = {i: name for i, name in enumerate(sorted(ALL_CARDS))}
-ID_TO_CARD[len(ALL_CARDS)] = "none"  # No-Op action
+ID_TO_CARD[len(ALL_CARDS)] = "None"  # No-Op action
 
 def load_model(checkpoint_path, config, device):
     """Load the trained model from checkpoint."""

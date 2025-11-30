@@ -1,6 +1,6 @@
 import pyarrow.parquet as pq
 
-table = pq.read_table("./training.parquet")
+table = pq.read_table("./new_arena_placement.parquet")
 total_rows = table.num_rows
 
 print(f"Analyzing {total_rows} samples...")

@@ -73,10 +73,6 @@ class ClashRoyaleDataset(Dataset):
         # Filter out samples with invalid hand data
         print("Filtering out samples with invalid data...")
         self.valid_indices = []
-        
-        # Check if hand column is missing from the table entirely
-        if "hand" not in self.table.column_names:
-            print("WARNING: Hand data is missing from the dataset. Applying no masking.")
 
         for i in range(self.table.num_rows):
             row_table = self.table.slice(i, 1)
@@ -91,15 +87,17 @@ class ClashRoyaleDataset(Dataset):
                     continue
 
                 # Check if card played is in hand
-                if card_played != "none" and card_played not in cards_in_hand:
+                if card_played != "None" and card_played not in cards_in_hand:
                     continue
 
             # Exclude samples where card was played but placement is unknown (-1, -1)
             # This indicates low confidence in placement detection
-            x_val = int(data["x"][0])
-            y_val = int(data["y"][0])
-            if card_played != "none" and x_val == -1 and y_val == -1:
-                continue
+            # Note: x and y columns may be missing entirely when card is "None"
+            if card_played != "None":
+                x_val = int(data["x"][0]) if "x" in data else -1
+                y_val = int(data["y"][0]) if "y" in data else -1
+                if x_val == -1 and y_val == -1:
+                    continue
 
             # Keep sample if it has a valid hand
             self.valid_indices.append(i)
@@ -124,12 +122,6 @@ class ClashRoyaleDataset(Dataset):
 
         # Decode the image from bytes
         raw_image_bytes = data["png_bytes"][0]
-        
-        # Check if raw_bytes is a list/array (multiple frames) or single bytes (one frame)
-        # pyarrow might return a list if it's a list column, or bytes if it's binary.
-        # However, the user said "stored in png_bytes", implying the column content.
-        # If it is a list of binaries, `data["png_bytes"][0]` should be a list.
-        # If it is a single binary, it is bytes.
         
         frame_list = []
         if isinstance(raw_image_bytes, (list, np.ndarray)):
@@ -158,45 +150,56 @@ class ClashRoyaleDataset(Dataset):
         
         if card_name in CARD_TO_ID:
             card_id = CARD_TO_ID[card_name]
-        elif card_name == "none":
+        elif card_name == "None":
             card_id = len(CARD_TO_ID)
         else:
             raise ValueError(f"Unknown card name: {card_name}")
 
-        tile_x = int(data["x"][0])
-        tile_y = int(data["y"][0])
-        
-        # Convert pixel coordinates to tile coordinates
-        pixel_x = tile_x
-        pixel_y = tile_y
-        tile_x = int((pixel_x - X_OFFSET_LEFT) / TILE_WIDTH)
-        tile_y = int((pixel_y - Y_OFFSET_TOP) / TILE_HEIGHT)
-        
-        # Clamp to valid range
-        tile_x = max(0, min(tile_x, NUM_COLS - 1))
-        tile_y = max(0, min(tile_y, NUM_ROWS - 1))
+        # Handle case where x/y columns may be missing when card is "None"
+        if card_name == "None":
+            tile_index = -1
+        else:
+            pixel_x = int(data["x"][0])
+            pixel_y = int(data["y"][0])
+            
+            # Convert pixel coordinates to tile coordinates
+            tile_x = int((pixel_x - X_OFFSET_LEFT) / TILE_WIDTH)
+            tile_y = int((pixel_y - Y_OFFSET_TOP) / TILE_HEIGHT)
+            
+            # Clamp to valid range
+            tile_x = max(0, min(tile_x, NUM_COLS - 1))
+            tile_y = max(0, min(tile_y, NUM_ROWS - 1))
+
+            tile_index = tile_y * NUM_COLS + tile_x
         
         # Check if hand column is missing
         if "hand" not in data:
             # Mark all cards as in hand and all cards as playable
             playable_mask = torch.ones(self.num_cards + 1, dtype=torch.float32)
             hand_mask = torch.ones(self.num_cards + 1, dtype=torch.float32)
+            print("WARNING: Hand data is missing from the dataset. Applying no masking.")
         else:
             hand_mask_ids = []
             playable_mask_ids = []
+            
             for c in data["hand"][0]:
-                # Skip None values
+                # None value indicates empty slot in hand
+                # Occurs during transitions after playing a card
+                # but before new card is drawn, or at the start of the game
                 if c is None:
                     continue
 
-                # if card is not playable, it will be prefixed with "gray_"
-                # in this case, we should not include it in the mask
                 if c in CARD_TO_ID:
                     playable_mask_ids.append(CARD_TO_ID[c])
-                # however, we should still include it in the hand
+
+                # if card is not playable (too expensive), it will be prefixed with "gray_"
+                # in this case, it will not be included in the playable mask
+                # however, we should still include it in the hand mask
+
                 # first, we need to strip the "gray_" prefix if it exists
                 if c.startswith("gray_"):
                     c = c[5:]
+
                 if c in CARD_TO_ID:
                     hand_mask_ids.append(CARD_TO_ID[c])
                 else:
@@ -222,19 +225,6 @@ class ClashRoyaleDataset(Dataset):
         red_king_tower_health = int(data["red_king_tower_health"][0]) if "red_king_tower_health" in data else 5000
 
         numeric_features = torch.tensor([elixir, blue_left_princess_tower_health, blue_right_princess_tower_health, blue_king_tower_health, red_left_princess_tower_health, red_right_princess_tower_health, red_king_tower_health], dtype=torch.float32)
-
-        label_card = torch.tensor(card_id, dtype=torch.int32) # equal to self.num_cards if no card was played
-        
-        # If tile_x is invalid OR card is "none", treat as No-Op
-        # "none" in CARD_TO_ID has an ID. 
-        # However, "none" implies No-Op.
-        # If card_name == "none", we should map it to self.num_cards (No-Op class).
-        
-        if card_name == "none" or pixel_x < 0 or pixel_y < 0:
-            tile_index = -1
-        else:
-            tile_index = tile_y * self.grid_w + tile_x
-
         label_card = torch.tensor(card_id, dtype=torch.int32)
         label_placement = torch.tensor(tile_index, dtype=torch.long)
 

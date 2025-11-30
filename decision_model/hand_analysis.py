@@ -2,7 +2,7 @@ import pyarrow.parquet as pq
 import random
 from dataset import ALL_CARDS, CARD_TO_ID
 
-table = pq.read_table("./initial_training_hand_elixir.parquet")
+table = pq.read_table("./new_arena_placement.parquet")
 total_rows = table.num_rows
 
 print(f"Analyzing {total_rows} samples...")
@@ -64,7 +64,7 @@ for i in range(total_rows):
         else:
             ground_truth_not_in_hand += 1
     else:
-        # Card name not recognized (e.g., "none")
+        # Card name not recognized (e.g., "None")
         ground_truth_not_in_hand += 1
 
 # Print statistics
