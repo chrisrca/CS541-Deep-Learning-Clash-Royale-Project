@@ -5,3 +5,5 @@ HUGGING_KEY.txt
 *.parquet
 replays/**
 *.json
+*.pyc
+*.zip
