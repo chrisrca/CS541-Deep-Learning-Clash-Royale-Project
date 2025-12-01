@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from huggingface_hub import list_repo_files, hf_hub_download
+from sklearn.metrics import precision_score, recall_score, f1_score
 import wandb
 
 from model import ConvLSTMClashRoyaleModel
@@ -238,10 +239,13 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
     total_card_loss = 0.0
     total_place_loss = 0.0
     total_batches = 0
-
-    # Accuracy metrics for card prediction
-    total_samples = 0
-    total_correct = 0
+    
+    # Collect all predictions and labels for F1/precision/recall
+    all_preds = []
+    all_labels = []
+    
+    # Index of the "None" (no-op) class
+    none_class_idx = config["num_cards"]  # None is at index len(ALL_CARDS)
 
     frames_per_sample = config["frames_per_sample"]
 
@@ -281,25 +285,41 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             total_place_loss += place_loss.item()
             total_batches += 1
 
-            # Accuracy for card prediction
-            with torch.no_grad():
-                preds = card_logits.argmax(dim=1)
-                total_correct += (preds == labels_card).sum().item()
-
-                total_samples += labels_card.shape[0]
+            # Collect predictions and labels for metrics
+            preds = card_logits.argmax(dim=1)
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(labels_card.cpu().tolist())
 
     avg_loss = total_loss / max(total_batches, 1)
     avg_card = total_card_loss / max(total_batches, 1)
     avg_place = total_place_loss / max(total_batches, 1)
 
-    # Compute accuracy
-    accuracy = total_correct / max(total_samples, 1)
+    # Convert to binary: None (no-op) = 0 (negative), any card = 1 (positive)
+    binary_preds = [0 if p == none_class_idx else 1 for p in all_preds]
+    binary_labels = [0 if l == none_class_idx else 1 for l in all_labels]
+    
+    # Binary metrics: no-op vs action
+    binary_precision = precision_score(binary_labels, binary_preds, zero_division=0)
+    binary_recall = recall_score(binary_labels, binary_preds, zero_division=0)
+    binary_f1 = f1_score(binary_labels, binary_preds, average='macro', zero_division=0)
+    
+    # Multi-class metrics: across all card classes including no-op
+    multiclass_precision = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+    multiclass_recall = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+    multiclass_f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
 
     # Print a concise summary line similar to training
     print(
         f"[Eval] {split_name} epoch {epoch + 1}: "
-        f"loss={avg_loss:.4f}, card={avg_card:.4f}, place={avg_place:.4f}, "
-        f"accuracy={accuracy:.4f}"
+        f"loss={avg_loss:.4f}, card={avg_card:.4f}, place={avg_place:.4f}"
+    )
+    print(
+        f"[Eval] {split_name} epoch {epoch + 1} (binary): "
+        f"precision={binary_precision:.4f}, recall={binary_recall:.4f}, f1={binary_f1:.4f}"
+    )
+    print(
+        f"[Eval] {split_name} epoch {epoch + 1} (multi-class): "
+        f"precision={multiclass_precision:.4f}, recall={multiclass_recall:.4f}, f1={multiclass_f1:.4f}"
     )
 
     wandb.log(
@@ -307,7 +327,12 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             f"{split_name}/loss": avg_loss,
             f"{split_name}/card_loss": avg_card,
             f"{split_name}/place_loss": avg_place,
-            f"{split_name}/accuracy": accuracy,
+            f"{split_name}/binary_precision": binary_precision,
+            f"{split_name}/binary_recall": binary_recall,
+            f"{split_name}/binary_f1": binary_f1,
+            f"{split_name}/multiclass_precision": multiclass_precision,
+            f"{split_name}/multiclass_recall": multiclass_recall,
+            f"{split_name}/multiclass_f1": multiclass_f1,
         }
     )
 
