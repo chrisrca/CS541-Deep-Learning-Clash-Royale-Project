@@ -30,15 +30,16 @@ class ClashBot():
         # Track previous line length
         self.prev_len = 0
         self.delay = 10
+        self.temperature = 0.7
 
         model = ConvLSTMClashRoyaleModel(
-            num_cards=len(ALL_CARDS)+1,
-            numeric_feat_dim=7,
+            num_cards=len(ALL_CARDS),
+            numeric_feat_dim=1,
             grid_h=32,
             grid_w=18,
         )
 
-        weights = torch.load("decision_model/checkpoints/new_arena_placement_model.pt", map_location=torch.device('cpu'))
+        weights = torch.load("decision_model/checkpoints/best_model.pt", map_location=torch.device('cpu'))
         model.load_state_dict(weights['model_state_dict']) # My laptop doesn't have an NVIDIA GPU
         self.model = model
         self.model.eval()
@@ -105,13 +106,11 @@ class ClashBot():
 
             # Hand mask is all 1s for cards in hand, 0s for empty slots
             # Playable mask is all 1s for cards that can be played with current elixir, 0s otherwise
-            numeric_features = torch.tensor([elixir if elixir is not None else 10, 3000, 3000, 5000, 3000, 3000, 5000], dtype=torch.float32)
+            numeric_features = torch.tensor([elixir / 10.0 if elixir is not None else 1.0], dtype=torch.float32)
             hand_mask_array = [1 if card in cards else 0 for card in ALL_CARDS]
-            hand_mask_array.append(1)
             hand_mask = torch.tensor(hand_mask_array, dtype=torch.float32)
 
             playable_mask_array = [1 for card in ALL_CARDS]
-            playable_mask_array.append(1)
             playable_mask = torch.tensor(playable_mask_array, dtype=torch.float32)
 
             numeric_features = numeric_features.unsqueeze(0)  # Add batch dimension
@@ -129,23 +128,29 @@ class ClashBot():
             with torch.no_grad():
                 prediction = self.model(frames, numeric_features, playable_mask, hand_mask)
             
-            for card in cards:
-                choice = None
+            # Action decision based on temperature
+            action_logit = prediction['action_logits'][0].item()
+            action_prob = torch.sigmoid(torch.tensor(action_logit)).item()
+            
+            should_act = action_prob > self.temperature
+            choice = None
+            
+            if should_act:
                 best_logit = -float('inf')
-                if card is not None and card in ALL_CARDS:
-                    index = ALL_CARDS.index(card)
-                    card_logit = prediction['card_logits'][0, index]
-                    if card_logit > best_logit:
-                        best_logit = card_logit
-                        choice = card
-                if prediction['card_logits'][0, -1] > best_logit:
-                    choice = None
-
-            #card_selected = torch.argmax(prediction['card_logits']).item()
-
-            #card_selected_name= ALL_CARDS[card_selected] if card_selected < len(ALL_CARDS) else "empty"
-            print(f"| Selected card: {choice}")
-            if choice in cards:
+                
+                # Find the best card to play among those in hand
+                for card in cards:
+                    if card is not None and card in ALL_CARDS:
+                        index = ALL_CARDS.index(card)
+                        card_logit = prediction['card_logits'][0, index].item()
+                        
+                        if card_logit > best_logit:
+                            best_logit = card_logit
+                            choice = card
+            
+            print(f"| Action Prob: {action_prob:.2f} | Act: {should_act} | Selected: {choice}")
+            
+            if choice is not None and choice in cards:
                 selected_index = cards.index(choice)
                 self.select_card(serial, selected_index + 1)
                 x, y = random.randrange(BATTLE_PLACE_REGION[1].start, BATTLE_PLACE_REGION[1].stop), random.randrange(BATTLE_PLACE_REGION[0].start, BATTLE_PLACE_REGION[0].stop)
