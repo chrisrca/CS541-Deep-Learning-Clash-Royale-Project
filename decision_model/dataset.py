@@ -35,6 +35,14 @@ ALL_CARDS = [
 ALL_CARDS.sort()
 CARD_TO_ID = {name: i for i, name in enumerate(ALL_CARDS)}
 
+# Spell cards to exclude from training/testing
+SPELL_CARDS = {
+    "arrows", "barb_barrel", "clone", "earthquake", "fireball", "freeze", 
+    "goblin_barrel", "goblin_curse", "graveyard", "lightning", "log", "poison", 
+    "rage", "rocket", "royal_delivery", "snowball", "tornado", "void", "zap",
+    "evo_goblin_barrel", "evo_snowball", "evo_zap"
+}
+
 # Grid discretization parameters (pixel to tile conversion)
 # These define the playable area within the image
 IMAGE_WIDTH = 432
@@ -100,6 +108,10 @@ class ClashRoyaleDataset(Dataset):
             row_table = self.table.slice(i, 1)
             data = row_table.to_pydict()
             card_played = data["card"][0]
+
+            # Filter out spell cards
+            if card_played in SPELL_CARDS:
+                continue
 
             # Validate hand data if present
             if "hand" in data:
