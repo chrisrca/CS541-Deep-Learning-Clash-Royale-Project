@@ -31,7 +31,7 @@ def build_dataloaders(config, device):
     # hf_repo_type = config.get("hf_repo_type", "dataset")
     # parquet_paths = get_hf_parquet_local_paths(hf_repo_id, repo_type=hf_repo_type)
 
-    parquet_paths = ["./new_arena_placement.parquet"]
+    parquet_paths = ["./new_arena_placement.parquet", "./Nones_arena_21.parquet", "./Nones_arena_22.parquet", "./Nones_arena_23.parquet", "./Nones_arena_24.parquet"]
     dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
 
     val_ratio = config.get("val_ratio", 0.1)
@@ -100,7 +100,10 @@ def build_model(config, device):
     return model.to(device)
 
 
-def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn, device, config, epoch, rolling_batch_losses=None, rolling_card_losses=None, rolling_place_losses=None):
+def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn, device, config, epoch, rolling_batch_losses=None, rolling_card_losses=None, rolling_place_losses=None, scaler=None, use_amp=False):  # type: ignore[type-arg]
+    """Train for one epoch with optional mixed precision."""
+    assert scaler is not None, "scaler must be provided"
+    
     model.train()
     total_loss = 0.0
     total_card_loss = 0.0
@@ -127,13 +130,14 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
         print(f"Starting training epoch {epoch + 1}...")
 
     for batch_idx, batch in enumerate(train_loader):
-        frames = batch["frames"].to(device)
-        numeric_features = batch["numeric_features"].to(device)
-        labels_card = batch["label_card"].long().to(device)
-        labels_placement = batch["label_placement"].long().to(device).view(-1)
+        # Use non_blocking=True to overlap CPU->GPU transfer with computation
+        frames = batch["frames"].to(device, non_blocking=True)
+        numeric_features = batch["numeric_features"].to(device, non_blocking=True)
+        labels_card = batch["label_card"].long().to(device, non_blocking=True)
+        labels_placement = batch["label_placement"].long().to(device, non_blocking=True).view(-1)
         
-        playable_mask = batch["playable_mask"].to(device)
-        hand_mask = batch["hand_mask"].to(device)
+        playable_mask = batch["playable_mask"].to(device, non_blocking=True)
+        hand_mask = batch["hand_mask"].to(device, non_blocking=True)
 
         if frames.ndim == 4:
             frames = frames.unsqueeze(1)
@@ -143,28 +147,47 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
         frames = frames[:, -use_T:, ...]
 
         optimizer.zero_grad(set_to_none=True)
-        outputs = model(frames, numeric_features, playable_mask, hand_mask)
-        card_logits = outputs["card_logits"]
-        placement_logits = outputs["placement_logits"] # (B, num_cards, grid_cells)
+        
+        # Use automatic mixed precision for forward pass
+        with torch.amp.autocast("cuda", enabled=use_amp): # type: ignore
+            outputs = model(frames, numeric_features, playable_mask, hand_mask)
+            card_logits = outputs["card_logits"]
+            placement_logits = outputs["placement_logits"] # (B, num_cards, grid_cells)
 
-        # Gather the placement logits for the ground-truth card
-        # labels_card: (B,) containing the index of the card played
-        B_dim = placement_logits.shape[0]
-        # We want [B, grid_cells] from [B, num_cards, grid_cells]
-        # using labels_card as the index for dim 1
-        relevant_placement_logits = placement_logits[torch.arange(B_dim, device=device), labels_card, :]
+            # Gather the placement logits for the ground-truth card
+            # labels_card: (B,) containing the index of the card played
+            B_dim = placement_logits.shape[0]
+            # We want [B, grid_cells] from [B, num_cards, grid_cells]
+            # using labels_card as the index for dim 1
+            relevant_placement_logits = placement_logits[torch.arange(B_dim, device=device), labels_card, :]
 
-        card_loss = card_loss_fn(card_logits, labels_card)
-        place_loss = place_loss_fn(relevant_placement_logits, labels_placement)
-        loss = card_loss + place_loss
+            card_loss = card_loss_fn(card_logits, labels_card)
+            place_loss = place_loss_fn(relevant_placement_logits, labels_placement)
+            
+            # Handle all-no-op batches: if all placements are -1, place_loss will be NaN
+            # Use rolling average as fallback to maintain training stability
+            if torch.isnan(place_loss):
+                if batch_place_losses:
+                    # Use rolling average of recent placement losses
+                    window = min(len(batch_place_losses), config.get("rolling_average_window", 100))
+                    recent_losses = batch_place_losses[-window:]
+                    place_loss = torch.tensor(sum(recent_losses) / len(recent_losses), device=device)
+                else:
+                    # First batch and all no-ops - use 0 as fallback
+                    place_loss = torch.tensor(0.0, device=device)
+            
+            loss = card_loss + place_loss
 
-        loss.backward()
+        # Scale loss and backward pass
+        scaler.scale(loss).backward()
 
         max_grad_norm = config.get("max_grad_norm", 0.0)
         if max_grad_norm and max_grad_norm > 0.0:
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item()
         total_card_loss += card_loss.item()
@@ -224,13 +247,14 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
 
     with torch.no_grad():
         for batch in data_loader:
-            frames = batch["frames"].to(device)
-            numeric_features = batch["numeric_features"].to(device)
-            labels_card = batch["label_card"].long().to(device)
-            labels_placement = batch["label_placement"].long().to(device).view(-1)
+            # Use non_blocking=True to overlap CPU->GPU transfer with computation
+            frames = batch["frames"].to(device, non_blocking=True)
+            numeric_features = batch["numeric_features"].to(device, non_blocking=True)
+            labels_card = batch["label_card"].long().to(device, non_blocking=True)
+            labels_placement = batch["label_placement"].long().to(device, non_blocking=True).view(-1)
             
-            playable_mask = batch["playable_mask"].to(device)
-            hand_mask = batch["hand_mask"].to(device)
+            playable_mask = batch["playable_mask"].to(device, non_blocking=True)
+            hand_mask = batch["hand_mask"].to(device, non_blocking=True)
 
             if frames.ndim == 4:
                 frames = frames.unsqueeze(1)
@@ -300,6 +324,10 @@ def run_training(game_config, hyperparameter_config, runtime_config):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {device}")
 
+        # Enable cuDNN auto-tuner for faster convolutions
+        if device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+
         train_loader, val_loader, test_loader = build_dataloaders(config, device)
         model = build_model(config, device)
 
@@ -325,6 +353,10 @@ def run_training(game_config, hyperparameter_config, runtime_config):
                 T_max=config["num_epochs"],
             )
 
+        # Use automatic mixed precision for faster training and lower memory
+        use_amp = config.get("use_amp", True) and device.type == "cuda"
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp) # type: ignore
+
         best_val_loss = float("inf")
 
         # Persistent rolling average lists across epochs
@@ -345,6 +377,8 @@ def run_training(game_config, hyperparameter_config, runtime_config):
                 rolling_batch_losses,
                 rolling_card_losses,
                 rolling_place_losses,
+                scaler=scaler,
+                use_amp=use_amp,
             )
 
             val_loss, val_card, val_place = evaluate(
