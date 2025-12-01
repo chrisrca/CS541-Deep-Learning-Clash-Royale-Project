@@ -5,13 +5,14 @@ from PIL import Image
 from torch.utils.data import Dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pyarrow.compute as pc
 
 # List of known cards derived from file names
 ALL_CARDS = [
     "archer_queen", "archers", "arrows", "baby_dragon", "balloon", "bandit", "barb_barrel", "barb_hut", "barbs", 
     "bats", "battle_ram", "berserker", "bomb_tower", "bomber", "boss_bandit", "bowler", "bush_goblin", 
     "caged_goblin", "cannon", "cannon_cart", "clone", "dark_prince", "dart_goblin", "e_barbs", "e_wiz", 
-    "earthquake", "electro_dragon", "electro_giant", "electro_spirit", "elixir_golem", "elixir_pump", "empty", 
+    "earthquake", "electro_dragon", "electro_giant", "electro_spirit", "elixir_golem", "elixir_pump", 
     "evo_archers", "evo_baby_dragon", "evo_barbs", "evo_bats", "evo_battle_ram", "evo_bomber", "evo_cannon", "evo_dart_goblin",
     "evo_electro_dragon", "evo_executioner", "evo_firecracker", "evo_furnace", "evo_ghost", "evo_goblin_barrel", "evo_goblin_cage", 
     "evo_goblin_drill", "evo_goblin_giant", "evo_hunter", "evo_ice_spirit", "evo_inferno_dragon", "evo_knight", "evo_lumberjack", "evo_mega_knight", "evo_mortar", 
@@ -66,6 +67,12 @@ class ClashRoyaleDataset(Dataset):
         tables = []
         for path in self.files:
             table = pq.read_table(path)
+
+            # If "offset" column exists, filter for offset=0 and drop column
+            if "offset" in table.column_names:
+                offset_filter = pc.equal(table.column("offset"), 0)
+                table = table.filter(offset_filter)
+                table = table.drop(["offset"])
             
             # Add missing x and y columns with default value -1 if they don't exist
             # Insert after png_bytes column to maintain consistent schema order
