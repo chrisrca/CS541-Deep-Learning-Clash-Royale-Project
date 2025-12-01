@@ -22,6 +22,7 @@ class CRElement:
     elixir_bar = BoundingBox(origin=(48,839+ 97), size=(418+54,3))
     elixir_bar_match = BoundingBox(origin=(145,935), size=(374,3))
     arena = BoundingBox(origin=(57,137), size=(428,683))
+    arena_match = BoundingBox(origin=(43,10), size=(457,737))
 
     cards_in_hand = []
     cards_in_hand_match = []
@@ -43,8 +44,11 @@ class CRElement:
         return np.median(np.abs(image - grayscaled)) < 5 # If grayscale version (not ready to play)
 
     @staticmethod
-    def cut_to_fit(image: np.ndarray, box: BoundingBox) -> np.ndarray:
-        return image[box.y_start():box.y_end(),box.x_start():box.x_end()]
+    def cut_to_fit(image: np.ndarray, box: BoundingBox, rescale: BoundingBox = None) -> np.ndarray:
+        snipped = image[box.y_start():box.y_end(),box.x_start():box.x_end()]
+        if rescale is not None:
+            snipped = cv2.resize(snipped, (rescale.size[0], rescale.size[1]), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
+        return snipped
     
     @staticmethod
     def get_images_in_hand(screenshot: np.ndarray, is_match: bool = False) -> list[np.ndarray]:
