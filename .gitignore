@@ -3,3 +3,7 @@ __pycache__
 /replays
 /.env
 /screenshots
+.venv/
+*.parquet
+__pycache__/
+wandb/
