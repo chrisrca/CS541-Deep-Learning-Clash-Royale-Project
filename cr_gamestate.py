@@ -18,6 +18,9 @@ class CRGameState:
 
         # Compute absolute difference per channel
         diff = np.abs(image - target_color)
+        # cv2.imshow("diff", cv2.resize(diff.astype(np.uint8), (500,500), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR))
+        # cv2.waitKey(0)
+        # print(np.mean(image, axis=1))
 
         # Mask of pixels within tolerance in all 3 channels
         mask = np.all(diff <= tolerance, axis=-1)
@@ -37,9 +40,9 @@ class CRGameState:
 
         return CRGameState._count_proportion_matching_pixels(
             image=elixir_bar,
-            target_color=np.array([132, 71, 78]) if not is_match else np.array([212, 33, 206]),
+            target_color=np.array([132, 71, 78]) if not is_match else np.array([164, 81, 51]),
             tolerance=11,
-            max=135 if not is_match else None
+            max=135
         )
     
     @staticmethod

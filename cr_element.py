@@ -20,7 +20,7 @@ class CRElement:
     elixir = BoundingBox(origin=(103 - 84,823 + 97), size=(30,25))
     elixir_match = BoundingBox(origin=(145,916), size=(30,25))
     elixir_bar = BoundingBox(origin=(48,839+ 97), size=(418+54,3))
-    elixir_bar_match = BoundingBox(origin=(145,941), size=(374,3))
+    elixir_bar_match = BoundingBox(origin=(145,935), size=(374,3))
     arena = BoundingBox(origin=(57,137), size=(428,683))
 
     cards_in_hand = []
