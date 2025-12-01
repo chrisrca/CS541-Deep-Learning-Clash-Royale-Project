@@ -5,16 +5,17 @@ Requirements:
     torch, torchvision
 
 Model summary:
-    - Backbone: MobileNetV2 for efficient feature numericction
+    - Backbone: MobileNetV2 for efficient feature extraction
     - Input:
         frames: (B, T, C, H, W) float tensor, normalized to backbone's expectation
         numeric_feats: (B, numeric_feat_dim) float tensor (per-sample, only current frame info)
-        playable_mask: (B, len(ALL_CARDS) + 1) boolean or 0/1 tensor where True/1 means legal
-        hand_mask: (B, len(ALL_CARDS) + 1) boolean or 0/1 tensor where True/1 means in hand
+        playable_mask: (B, num_cards) boolean or 0/1 tensor where True/1 means legal to play
+        hand_mask: (B, num_cards) boolean or 0/1 tensor where True/1 means in hand
     - Outputs:
-        card_logits: (B, num_cards) raw logits (masked by playable_mask)
-        placement_logits: (B, grid_h * grid_w) raw logits over grid cells
-        placement_map: (B, grid_h, grid_w) raw logits reshaped
+        action_logits: (B, 1) raw logits for binary action decision (sigmoid -> probability of playing)
+        card_logits: (B, num_cards) raw logits for which card to play (masked by playable_mask)
+        placement_logits: (B, num_cards, grid_h * grid_w) raw logits over grid cells per card
+        placement_map: (B, num_cards, grid_h, grid_w) raw logits reshaped
 """
 
 import torch
@@ -180,16 +181,27 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         self.convlstm = ConvLSTM(input_channels=backbone_out_ch, hidden_channels=convlstm_hidden,
                                  kernel_size=convlstm_kernel, padding=convlstm_kernel // 2)
 
-        # card head:
+        # Shared feature dimension for both heads
+        shared_feat_dim = convlstm_hidden + numeric_feat_dim + num_cards  # +num_cards for hand_mask
+        head_hidden = max(128, convlstm_hidden)
+        
+        # Action head: binary classifier (play vs no-play)
         # global pooling of final hidden map -> vector (B, convlstm_hidden)
-        # then concat numeric_feats (B, numeric_feat_dim) and hand_mask (B, num_cards) -> MLP -> num_cards logits
-        card_head_hidden = max(128, convlstm_hidden)
-        hand_mask_dim = num_cards  # hand_mask has shape (B, num_cards)
-        self.card_head_mlp = nn.Sequential(
-            nn.LayerNorm(convlstm_hidden + numeric_feat_dim + hand_mask_dim),
-            nn.Linear(convlstm_hidden + numeric_feat_dim + hand_mask_dim, card_head_hidden),
+        # then concat numeric_feats (B, numeric_feat_dim) and hand_mask (B, num_cards) -> MLP -> 1 logit
+        self.action_head_mlp = nn.Sequential(
+            nn.LayerNorm(shared_feat_dim),
+            nn.Linear(shared_feat_dim, head_hidden),
             nn.GELU(),
-            nn.Linear(card_head_hidden, num_cards),
+            nn.Linear(head_hidden, 1),  # Single logit, use BCE loss
+        )
+        
+        # Card head: multi-class classifier for which card to play
+        # Same input as action head -> MLP -> num_cards logits
+        self.card_head_mlp = nn.Sequential(
+            nn.LayerNorm(shared_feat_dim),
+            nn.Linear(shared_feat_dim, head_hidden),
+            nn.GELU(),
+            nn.Linear(head_hidden, num_cards),
         )
 
         # placement head:
@@ -223,11 +235,12 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         Args:
             frames: (B, T, C, H, W)
             numeric_feats: (B, numeric_feat_dim)
-            playable_mask: (B, len(ALL_CARDS) + 1) boolean or 0/1 tensor where True=legal
-            hand_mask: (B, len(ALL_CARDS) + 1) boolean or 0/1 tensor where True=in hand
+            playable_mask: (B, num_cards) boolean or 0/1 tensor where True=legal to play
+            hand_mask: (B, num_cards) boolean or 0/1 tensor where True=in hand
         Returns:
             dict with:
-             - card_logits: (B, num_cards)
+             - action_logits: (B, 1) binary logit for play vs no-play
+             - card_logits: (B, num_cards) masked by playable_mask
              - placement_logits: (B, num_cards, grid_h * grid_w)
              - placement_map: (B, num_cards, grid_h, grid_w)
              - convlstm_hidden_seq: (B, T, convlstm_hidden, Hf, Wf)
@@ -248,13 +261,17 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         h_seq, (h_last, c_last) = self.convlstm(spatial_seq)  # h_seq: (B, T, convlstm_hidden, Hf, Wf)
         # h_last: (B, convlstm_hidden, Hf, Wf)
 
-        # 3) card head
+        # 3) Shared feature computation
         # global-pool h_last -> (B, convlstm_hidden)
         pooled = F.adaptive_avg_pool2d(h_last, output_size=(1, 1)).view(B, -1)  # (B, convlstm_hidden)
         # concat numeric feats and hand_mask
-        card_input = torch.cat([pooled, numeric_feats, hand_mask], dim=1)  # (B, convlstm_hidden + numeric_feat_dim + hand_mask_dim)
-        card_logits = self.card_head_mlp(card_input)  # (B, num_cards)
-
+        shared_input = torch.cat([pooled, numeric_feats, hand_mask], dim=1)  # (B, convlstm_hidden + numeric_feat_dim + num_cards)
+        
+        # 4) Action head: binary play vs no-play decision
+        action_logits = self.action_head_mlp(shared_input)  # (B, 1)
+        
+        # 5) Card head: which card to play
+        card_logits = self.card_head_mlp(shared_input)  # (B, num_cards)
         # apply playable mask
         card_logits[~playable_mask.bool()] = -100.0
 
@@ -281,6 +298,7 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         placement_logits = logits_map_resized.flatten(2)
 
         return {
+            "action_logits": action_logits,
             "card_logits": card_logits,
             "placement_logits": placement_logits,
             "placement_map": logits_map_resized,

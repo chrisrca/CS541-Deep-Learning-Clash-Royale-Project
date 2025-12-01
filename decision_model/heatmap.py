@@ -11,7 +11,7 @@ config = {
     "num_cards": len(ALL_CARDS),
     "grid_h": 32,
     "grid_w": 18,
-    "numeric_feat_dim": 7,
+    "numeric_feat_dim": 1,
     "convlstm_hidden": 128,
     "backbone_proj_channels": 128,
     "val_ratio": 0.1,
@@ -20,11 +20,10 @@ config = {
 
 # Create ID to card name mapping
 ID_TO_CARD = {i: name for i, name in enumerate(sorted(ALL_CARDS))}
-ID_TO_CARD[len(ALL_CARDS)] = "None"  # No-Op action
 
 def load_model(checkpoint_path, config, device):
     """Load the trained model from checkpoint."""
-    num_cards = config["num_cards"] + 1  # +1 for No-Op
+    num_cards = config["num_cards"]  # No more +1 for No-Op
     
     model = ConvLSTMClashRoyaleModel(
         num_cards=num_cards,
