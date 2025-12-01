@@ -3,7 +3,9 @@ import cv2
 import os
 import random
 import numpy as np
+import torch
 
+from decision_model.model import ConvLSTMClashRoyaleModel
 from cr_detection.cr_element import CRElement
 from cr_detection.cr_gamestate import CRGameState
 from mumu_adb import MuMuADB
@@ -18,6 +20,7 @@ card_templates = {
     for filename in os.listdir("cr_detection/cards/")
 }
 
+
 class ClashBot():
     def __init__(self):
         self.mumu = MuMuADB(adb_path="scrcpy/adb.exe", fps=30)
@@ -28,6 +31,17 @@ class ClashBot():
         self.prev_len = 0
         self.delay = 10
 
+        model = ConvLSTMClashRoyaleModel(
+            num_cards=len(ALL_CARDS)+1,
+            numeric_feat_dim=7,
+            grid_h=32,
+            grid_w=18,
+        )
+
+        weights = torch.load("decision_model/checkpoints/new_arena_placement_model.pt", map_location=torch.device('cpu'))
+        model.load_state_dict(weights['model_state_dict']) # My laptop doesn't have an NVIDIA GPU
+        self.model = model
+        self.model.eval()
         self.mumu.run(self.run)
     
 
@@ -59,7 +73,7 @@ class ClashBot():
             elixir = CRGameState.current_elixir(
                 screenshot=frame,
                 elixir_images=elixir_templates,
-                confidence=0.7
+                confidence=0.5
             )
 
             # Get cards in hand
@@ -85,16 +99,58 @@ class ClashBot():
             
             print(f"\r{output}", end="", flush=True)
 
-            # Pick random card
-            if self.delay > 0:
-                self.delay -= 1
-            else:
-                self.delay = 10
-                card = random.randint(1, 4)
-                self.select_card(serial, card)
-                # Place randomly
+            # GET MODEL OUTPUT
+            # card_selected = output['card_logits'] (choose card from hand with highest logit value)
+            # placement_logits = output['placement_logits'] (choose max value)
+
+            # Hand mask is all 1s for cards in hand, 0s for empty slots
+            # Playable mask is all 1s for cards that can be played with current elixir, 0s otherwise
+            numeric_features = torch.tensor([elixir if elixir is not None else 10, 3000, 3000, 5000, 3000, 3000, 5000], dtype=torch.float32)
+            hand_mask_array = [1 if card in cards else 0 for card in ALL_CARDS]
+            hand_mask_array.append(1)
+            hand_mask = torch.tensor(hand_mask_array, dtype=torch.float32)
+
+            playable_mask_array = [1 for card in ALL_CARDS]
+            playable_mask_array.append(1)
+            playable_mask = torch.tensor(playable_mask_array, dtype=torch.float32)
+
+            numeric_features = numeric_features.unsqueeze(0)  # Add batch dimension
+            hand_mask = hand_mask.unsqueeze(0)  # Add batch dimension
+            playable_mask = playable_mask.unsqueeze(0)  # Add batch dimension
+
+
+            t = torch.from_numpy(frame.astype(np.float32))
+
+            t = t.permute(2, 0, 1)
+            frames = t[None, None, ...]
+            frames = frames / 255.0
+
+
+            with torch.no_grad():
+                prediction = self.model(frames, numeric_features, playable_mask, hand_mask)
+            
+            for card in cards:
+                choice = None
+                best_logit = -float('inf')
+                if card is not None and card in ALL_CARDS:
+                    index = ALL_CARDS.index(card)
+                    card_logit = prediction['card_logits'][0, index]
+                    if card_logit > best_logit:
+                        best_logit = card_logit
+                        choice = card
+                if prediction['card_logits'][0, -1] > best_logit:
+                    choice = None
+
+            #card_selected = torch.argmax(prediction['card_logits']).item()
+
+            #card_selected_name= ALL_CARDS[card_selected] if card_selected < len(ALL_CARDS) else "empty"
+            print(f"| Selected card: {choice}")
+            if choice in cards:
+                selected_index = cards.index(choice)
+                self.select_card(serial, selected_index + 1)
                 x, y = random.randrange(BATTLE_PLACE_REGION[1].start, BATTLE_PLACE_REGION[1].stop), random.randrange(BATTLE_PLACE_REGION[0].start, BATTLE_PLACE_REGION[0].stop)
                 self.place_card(serial, x, y)
+
             time.sleep(0.08)
 
     def screenshot(self, serial):
