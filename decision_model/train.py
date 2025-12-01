@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from huggingface_hub import list_repo_files, hf_hub_download
+from sklearn.metrics import precision_score, recall_score, f1_score
 import wandb
 
 from model import ConvLSTMClashRoyaleModel
@@ -31,7 +32,7 @@ def build_dataloaders(config, device):
     # hf_repo_type = config.get("hf_repo_type", "dataset")
     # parquet_paths = get_hf_parquet_local_paths(hf_repo_id, repo_type=hf_repo_type)
 
-    parquet_paths = ["./new_arena_placement.parquet", "./Nones_arena_21.parquet", "./Nones_arena_22.parquet", "./Nones_arena_23.parquet", "./Nones_arena_24.parquet"]
+    parquet_paths = ["./new_arena_placement.parquet", "./Nones_arena_21.parquet", "./Nones_arena_22.parquet"]
     dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
 
     val_ratio = config.get("val_ratio", 0.1)
@@ -70,12 +71,39 @@ def build_dataloaders(config, device):
         shuffle=False,
         pin_memory=(device.type == "cuda"),
     )
-    return train_loader, val_loader, test_loader
+    return train_loader, val_loader, test_loader, dataset
+
+
+def compute_action_pos_weight(dataset, device):
+    """Compute pos_weight for BCEWithLogitsLoss to balance action classes.
+    
+    pos_weight = num_negative / num_positive
+    This gives higher weight to the minority class.
+    """
+    num_positive = 0  # action = 1 (play a card)
+    num_negative = 0  # action = 0 (no-op)
+    
+    for idx in range(len(dataset)):
+        sample = dataset[idx]
+        action = sample["label_action"].item()
+        if action == 1:
+            num_positive += 1
+        else:
+            num_negative += 1
+    
+    if num_positive == 0:
+        pos_weight = 1.0
+    else:
+        pos_weight = num_negative / num_positive
+    
+    print(f"Action class balance: positive={num_positive}, negative={num_negative}, pos_weight={pos_weight:.4f}")
+    
+    return torch.tensor([pos_weight], device=device)
 
 
 def build_model(config, device):
-    # We add +1 to num_cards to account for the "No-Op" / "Wait" action
-    num_cards = config["num_cards"] + 1
+    # num_cards is the number of actual cards (no no-op class)
+    num_cards = config["num_cards"]
     grid_h = config["grid_h"]
     grid_w = config["grid_w"]
     numeric_feat_dim = config["numeric_feat_dim"]
@@ -100,26 +128,32 @@ def build_model(config, device):
     return model.to(device)
 
 
-def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn, device, config, epoch, rolling_batch_losses=None, rolling_card_losses=None, rolling_place_losses=None, scaler=None, use_amp=False):  # type: ignore[type-arg]
+def train_one_epoch(model, train_loader, optimizer, action_loss_fn, card_loss_fn, place_loss_fn, device, config, epoch, rolling_losses=None, scaler=None, use_amp=False):  # type: ignore[type-arg]
     """Train for one epoch with optional mixed precision."""
     assert scaler is not None, "scaler must be provided"
     
     model.train()
     total_loss = 0.0
+    total_action_loss = 0.0
     total_card_loss = 0.0
     total_place_loss = 0.0
     total_batches = 0
+    total_action_batches = 0  # Batches where we compute card loss (action=1)
 
     # Store per-batch losses to compute rolling averages for logging.
-    # Use persistent lists that carry over across epochs if provided
-    if rolling_batch_losses is None:
-        batch_losses = []
-        batch_card_losses = []
-        batch_place_losses = []
-    else:
-        batch_losses = rolling_batch_losses
-        batch_card_losses = rolling_card_losses
-        batch_place_losses = rolling_place_losses
+    # Use persistent dict that carries over across epochs if provided
+    if rolling_losses is None:
+        rolling_losses = {
+            "batch": [],
+            "action": [],
+            "card": [],
+            "place": [],
+        }
+    
+    batch_losses = rolling_losses["batch"]
+    batch_action_losses = rolling_losses["action"]
+    batch_card_losses = rolling_losses["card"]
+    batch_place_losses = rolling_losses["place"]
 
     frames_per_sample = config["frames_per_sample"]
 
@@ -133,6 +167,7 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
         # Use non_blocking=True to overlap CPU->GPU transfer with computation
         frames = batch["frames"].to(device, non_blocking=True)
         numeric_features = batch["numeric_features"].to(device, non_blocking=True)
+        labels_action = batch["label_action"].long().to(device, non_blocking=True)
         labels_card = batch["label_card"].long().to(device, non_blocking=True)
         labels_placement = batch["label_placement"].long().to(device, non_blocking=True).view(-1)
         
@@ -151,32 +186,44 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
         # Use automatic mixed precision for forward pass
         with torch.amp.autocast("cuda", enabled=use_amp): # type: ignore
             outputs = model(frames, numeric_features, playable_mask, hand_mask)
-            card_logits = outputs["card_logits"]
-            placement_logits = outputs["placement_logits"] # (B, num_cards, grid_cells)
+            action_logits = outputs["action_logits"]  # (B, 1)
+            card_logits = outputs["card_logits"]  # (B, num_cards)
+            placement_logits = outputs["placement_logits"]  # (B, num_cards, grid_cells)
 
-            # Gather the placement logits for the ground-truth card
-            # labels_card: (B,) containing the index of the card played
-            B_dim = placement_logits.shape[0]
-            # We want [B, grid_cells] from [B, num_cards, grid_cells]
-            # using labels_card as the index for dim 1
-            relevant_placement_logits = placement_logits[torch.arange(B_dim, device=device), labels_card, :]
-
-            card_loss = card_loss_fn(card_logits, labels_card)
-            place_loss = place_loss_fn(relevant_placement_logits, labels_placement)
+            # Action loss: binary classification (no-op vs play)
+            action_loss = action_loss_fn(action_logits.squeeze(1), labels_action.float())
             
-            # Handle all-no-op batches: if all placements are -1, place_loss will be NaN
-            # Use rolling average as fallback to maintain training stability
-            if torch.isnan(place_loss):
+            # Card loss and placement loss: only for samples where action=1 (play a card)
+            action_mask = labels_action == 1
+            
+            if action_mask.any():
+                # Filter to samples where a card was played
+                card_logits_masked = card_logits[action_mask]
+                labels_card_masked = labels_card[action_mask]
+                placement_logits_masked = placement_logits[action_mask]
+                labels_placement_masked = labels_placement[action_mask]
+                
+                # Card loss
+                card_loss = card_loss_fn(card_logits_masked, labels_card_masked)
+                
+                # Placement loss: gather logits for the ground-truth card
+                B_masked = placement_logits_masked.shape[0]
+                relevant_placement_logits = placement_logits_masked[
+                    torch.arange(B_masked, device=device), labels_card_masked, :
+                ]
+                place_loss = place_loss_fn(relevant_placement_logits, labels_placement_masked)
+            else:
+                # No samples with action=1 in this batch
+                card_loss = torch.tensor(0.0, device=device)
+                # Use rolling average for placement loss if available
                 if batch_place_losses:
-                    # Use rolling average of recent placement losses
                     window = min(len(batch_place_losses), config.get("rolling_average_window", 100))
                     recent_losses = batch_place_losses[-window:]
                     place_loss = torch.tensor(sum(recent_losses) / len(recent_losses), device=device)
                 else:
-                    # First batch and all no-ops - use 0 as fallback
                     place_loss = torch.tensor(0.0, device=device)
             
-            loss = card_loss + place_loss
+            loss = action_loss + card_loss + place_loss
 
         # Scale loss and backward pass
         scaler.scale(loss).backward()
@@ -190,58 +237,65 @@ def train_one_epoch(model, train_loader, optimizer, card_loss_fn, place_loss_fn,
         scaler.update()
 
         total_loss += loss.item()
-        total_card_loss += card_loss.item()
-        total_place_loss += place_loss.item()
+        total_action_loss += action_loss.item()
+        if action_mask.any():
+            total_card_loss += card_loss.item()
+            total_place_loss += place_loss.item()
+            total_action_batches += 1
         total_batches += 1
 
         batch_losses.append(loss.item())
-        batch_card_losses.append(card_loss.item()) # type: ignore
-        batch_place_losses.append(place_loss.item()) # type: ignore
+        batch_action_losses.append(action_loss.item())
+        if action_mask.any():
+            batch_card_losses.append(card_loss.item())
+            batch_place_losses.append(place_loss.item())
 
+        # Compute rolling average over the last N batches
+        window = config["rolling_average_window"]
+        start_idx = max(0, len(batch_losses) - window)
+        window_losses = batch_losses[start_idx:]
+        window_action_losses = batch_action_losses[start_idx:]
+        window_card_losses = batch_card_losses[max(0, len(batch_card_losses) - window):]
+        window_place_losses = batch_place_losses[max(0, len(batch_place_losses) - window):]
+        
+        avg_window_loss = sum(window_losses) / max(len(window_losses), 1)
+        avg_window_action = sum(window_action_losses) / max(len(window_action_losses), 1)
+        avg_window_card = sum(window_card_losses) / max(len(window_card_losses), 1) if window_card_losses else 0.0
+        avg_window_place = sum(window_place_losses) / max(len(window_place_losses), 1) if window_place_losses else 0.0
+
+        wandb.log(
+            {
+                "train/loss": avg_window_loss,
+                "train/action_loss": avg_window_action,
+                "train/card_loss": avg_window_card,
+                "train/place_loss": avg_window_place,
+            }
+        )
+
+        # Only print every log_every batches
         if (batch_idx + 1) % config["log_every"] == 0:
-            # Compute rolling average over the last N batches
-            window = config["rolling_average_window"]
-            start_idx = max(0, len(batch_losses) - window)
-            window_losses = batch_losses[start_idx:]
-            window_card_losses = batch_card_losses[start_idx:] # type: ignore
-            window_place_losses = batch_place_losses[start_idx:] # type: ignore
-            avg_window_loss = sum(window_losses) / max(len(window_losses), 1)
-            avg_window_card = sum(window_card_losses) / max(len(window_card_losses), 1)
-            avg_window_place = sum(window_place_losses) / max(len(window_place_losses), 1)
-
             print(
                 f"[Train] epoch {epoch + 1}, batch {batch_idx + 1}/{len(train_loader)} "
-                f"loss={avg_window_loss:.4f}, card={avg_window_card:.4f}, place={avg_window_place:.4f}"
-            )
-            wandb.log(
-                {
-                    "train/loss": avg_window_loss,
-                    "train/card_loss": avg_window_card,
-                    "train/place_loss": avg_window_place,
-                }
+                f"loss={avg_window_loss:.4f}, action={avg_window_action:.4f}, card={avg_window_card:.4f}, place={avg_window_place:.4f}"
             )
 
-    avg_loss = total_loss / max(total_batches, 1)
-    avg_card = total_card_loss / max(total_batches, 1)
-    avg_place = total_place_loss / max(total_batches, 1)
-
-    print(
-        f"[Train] epoch {epoch + 1} completed: "
-        f"avg loss={avg_loss:.4f}, avg card={avg_card:.4f}, avg place={avg_place:.4f}"
-    )
-    return avg_loss, avg_card, avg_place
+    return rolling_losses
 
 
-def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, epoch, split_name):
+def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, device, config, epoch, split_name):
     model.eval()
     total_loss = 0.0
+    total_action_loss = 0.0
     total_card_loss = 0.0
     total_place_loss = 0.0
     total_batches = 0
-
-    # Accuracy metrics for card prediction
-    total_samples = 0
-    total_correct = 0
+    total_action_batches = 0  # Batches with action=1 samples
+    
+    # Collect predictions and labels for metrics
+    all_action_preds = []
+    all_action_labels = []
+    all_card_preds = []  # Only for samples where action=1
+    all_card_labels = []  # Only for samples where action=1
 
     frames_per_sample = config["frames_per_sample"]
 
@@ -250,6 +304,7 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             # Use non_blocking=True to overlap CPU->GPU transfer with computation
             frames = batch["frames"].to(device, non_blocking=True)
             numeric_features = batch["numeric_features"].to(device, non_blocking=True)
+            labels_action = batch["label_action"].long().to(device, non_blocking=True)
             labels_card = batch["label_card"].long().to(device, non_blocking=True)
             labels_placement = batch["label_placement"].long().to(device, non_blocking=True).view(-1)
             
@@ -264,54 +319,105 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
             frames = frames[:, -use_T:, ...]
 
             outputs = model(frames, numeric_features, playable_mask, hand_mask)
-            card_logits = outputs["card_logits"]
-            placement_logits = outputs["placement_logits"]
+            action_logits = outputs["action_logits"]  # (B, 1)
+            card_logits = outputs["card_logits"]  # (B, num_cards)
+            placement_logits = outputs["placement_logits"]  # (B, num_cards, grid_cells)
 
-            # Select placement logits for the ground-truth card, to match
-            # the training-time loss computation shape: [B, grid_cells]
-            B_dim = placement_logits.shape[0]
-            relevant_placement_logits = placement_logits[torch.arange(B_dim, device=device), labels_card, :]
-
-            card_loss = card_loss_fn(card_logits, labels_card)
-            place_loss = place_loss_fn(relevant_placement_logits, labels_placement)
-            loss = card_loss + place_loss
+            # Action loss
+            action_loss = action_loss_fn(action_logits.squeeze(1), labels_action.float())
+            total_action_loss += action_loss.item()
+            
+            # Card and placement loss: only for samples where action=1
+            action_mask = labels_action == 1
+            
+            if action_mask.any():
+                card_logits_masked = card_logits[action_mask]
+                labels_card_masked = labels_card[action_mask]
+                placement_logits_masked = placement_logits[action_mask]
+                labels_placement_masked = labels_placement[action_mask]
+                
+                card_loss = card_loss_fn(card_logits_masked, labels_card_masked)
+                
+                B_masked = placement_logits_masked.shape[0]
+                relevant_placement_logits = placement_logits_masked[
+                    torch.arange(B_masked, device=device), labels_card_masked, :
+                ]
+                place_loss = place_loss_fn(relevant_placement_logits, labels_placement_masked)
+                
+                total_card_loss += card_loss.item()
+                total_place_loss += place_loss.item()
+                total_action_batches += 1
+                
+                loss = action_loss + card_loss + place_loss
+                
+                # Collect card predictions for samples with action=1
+                card_preds = card_logits_masked.argmax(dim=1)
+                all_card_preds.extend(card_preds.cpu().tolist())
+                all_card_labels.extend(labels_card_masked.cpu().tolist())
+            else:
+                loss = action_loss
 
             total_loss += loss.item()
-            total_card_loss += card_loss.item()
-            total_place_loss += place_loss.item()
             total_batches += 1
 
-            # Accuracy for card prediction
-            with torch.no_grad():
-                preds = card_logits.argmax(dim=1)
-                total_correct += (preds == labels_card).sum().item()
-
-                total_samples += labels_card.shape[0]
+            # Collect action predictions (sigmoid > 0.5)
+            action_preds = (torch.sigmoid(action_logits.squeeze(1)) > 0.5).long()
+            all_action_preds.extend(action_preds.cpu().tolist())
+            all_action_labels.extend(labels_action.cpu().tolist())
 
     avg_loss = total_loss / max(total_batches, 1)
-    avg_card = total_card_loss / max(total_batches, 1)
-    avg_place = total_place_loss / max(total_batches, 1)
+    avg_action = total_action_loss / max(total_batches, 1)
+    avg_card = total_card_loss / max(total_action_batches, 1) if total_action_batches > 0 else 0.0
+    avg_place = total_place_loss / max(total_action_batches, 1) if total_action_batches > 0 else 0.0
 
-    # Compute accuracy
-    accuracy = total_correct / max(total_samples, 1)
+    # Action metrics: binary classification (play vs no-play)
+    action_precision = precision_score(all_action_labels, all_action_preds, pos_label=1, zero_division=0)
+    action_recall = recall_score(all_action_labels, all_action_preds, pos_label=1, zero_division=0)
+    action_f1 = f1_score(all_action_labels, all_action_preds, pos_label=1, zero_division=0)
+    action_accuracy = sum(p == l for p, l in zip(all_action_preds, all_action_labels)) / max(len(all_action_preds), 1)
+    
+    # Card metrics: multi-class (only over samples where action=1)
+    if all_card_labels:
+        present_classes = sorted(set(all_card_labels))
+        card_precision = precision_score(all_card_labels, all_card_preds, labels=present_classes, average='macro', zero_division=0)
+        card_recall = recall_score(all_card_labels, all_card_preds, labels=present_classes, average='macro', zero_division=0)
+        card_f1 = f1_score(all_card_labels, all_card_preds, labels=present_classes, average='macro', zero_division=0)
+        card_accuracy = sum(p == l for p, l in zip(all_card_preds, all_card_labels)) / max(len(all_card_preds), 1)
+    else:
+        card_precision = card_recall = card_f1 = card_accuracy = 0.0
 
-    # Print a concise summary line similar to training
+    # Print summary
     print(
         f"[Eval] {split_name} epoch {epoch + 1}: "
-        f"loss={avg_loss:.4f}, card={avg_card:.4f}, place={avg_place:.4f}, "
-        f"accuracy={accuracy:.4f}"
+        f"loss={avg_loss:.4f}, action={avg_action:.4f}, card={avg_card:.4f}, place={avg_place:.4f}"
+    )
+    print(
+        f"[Eval] {split_name} epoch {epoch + 1} (action head): "
+        f"accuracy={action_accuracy:.4f}, precision={action_precision:.4f}, recall={action_recall:.4f}, f1={action_f1:.4f}"
+    )
+    print(
+        f"[Eval] {split_name} epoch {epoch + 1} (card head): "
+        f"accuracy={card_accuracy:.4f}, precision={card_precision:.4f}, recall={card_recall:.4f}, f1={card_f1:.4f}"
     )
 
     wandb.log(
         {
             f"{split_name}/loss": avg_loss,
+            f"{split_name}/action_loss": avg_action,
             f"{split_name}/card_loss": avg_card,
             f"{split_name}/place_loss": avg_place,
-            f"{split_name}/accuracy": accuracy,
+            f"{split_name}/action_accuracy": action_accuracy,
+            f"{split_name}/action_precision": action_precision,
+            f"{split_name}/action_recall": action_recall,
+            f"{split_name}/action_f1": action_f1,
+            f"{split_name}/card_accuracy": card_accuracy,
+            f"{split_name}/card_precision": card_precision,
+            f"{split_name}/card_recall": card_recall,
+            f"{split_name}/card_f1": card_f1,
         }
     )
 
-    return avg_loss, avg_card, avg_place
+    return avg_loss
 
 
 def run_training(game_config, hyperparameter_config, runtime_config):
@@ -328,7 +434,7 @@ def run_training(game_config, hyperparameter_config, runtime_config):
         if device.type == "cuda":
             torch.backends.cudnn.benchmark = True
 
-        train_loader, val_loader, test_loader = build_dataloaders(config, device)
+        train_loader, val_loader, test_loader, dataset = build_dataloaders(config, device)
         model = build_model(config, device)
 
         # Log basic model information
@@ -337,8 +443,13 @@ def run_training(game_config, hyperparameter_config, runtime_config):
         print(f"Model: {model.__class__.__name__}")
         print(f"Total parameters: {num_params:,}; trainable: {num_trainable:,}")
 
-        card_loss_fn = nn.CrossEntropyLoss()
-        place_loss_fn = nn.CrossEntropyLoss(ignore_index=-1) # No placement loss when no card was played
+        # Compute pos_weight for balanced action loss
+        action_pos_weight = compute_action_pos_weight(dataset, device)
+        
+        # Loss functions for two-head architecture
+        action_loss_fn = nn.BCEWithLogitsLoss(pos_weight=action_pos_weight)  # Balanced binary loss
+        card_loss_fn = nn.CrossEntropyLoss()     # Multi-class: which card
+        place_loss_fn = nn.CrossEntropyLoss()    # Placement on grid
 
         optimizer = optim.AdamW(
             model.parameters(),
@@ -359,31 +470,29 @@ def run_training(game_config, hyperparameter_config, runtime_config):
 
         best_val_loss = float("inf")
 
-        # Persistent rolling average lists across epochs
-        rolling_batch_losses = []
-        rolling_card_losses = []
-        rolling_place_losses = []
+        # Persistent rolling average dict across epochs
+        rolling_losses = None
 
         for epoch in range(config["num_epochs"]):
-            train_loss, train_card, train_place = train_one_epoch(
+            rolling_losses = train_one_epoch(
                 model,
                 train_loader,
                 optimizer,
+                action_loss_fn,
                 card_loss_fn,
                 place_loss_fn,
                 device,
                 config,
                 epoch,
-                rolling_batch_losses,
-                rolling_card_losses,
-                rolling_place_losses,
+                rolling_losses,
                 scaler=scaler,
                 use_amp=use_amp,
             )
 
-            val_loss, val_card, val_place = evaluate(
+            val_loss = evaluate(
                 model,
                 val_loader,
+                action_loss_fn,
                 card_loss_fn,
                 place_loss_fn,
                 device,
@@ -402,9 +511,10 @@ def run_training(game_config, hyperparameter_config, runtime_config):
                 torch.save({"model_state_dict": model.state_dict(), "config": dict(config)}, save_path)
 
         # final test evaluation
-        test_loss, test_card, test_place = evaluate(
+        test_loss = evaluate(
             model,
             test_loader,
+            action_loss_fn,
             card_loss_fn,
             place_loss_fn,
             device,
@@ -420,7 +530,7 @@ if __name__ == "__main__":
         "num_cards": len(ALL_CARDS),
         "grid_h": 32,
         "grid_w": 18,
-        "numeric_feat_dim": 7,
+        "numeric_feat_dim": 1,
     }
     
     hyperparameter_config = {
@@ -442,7 +552,7 @@ if __name__ == "__main__":
         "hf_repo_type": "dataset",
         "val_ratio": 0.1,
         "test_ratio": 0.1,
-        "log_every": 1,
+        "log_every": 10,
         "rolling_average_window": 100,
         "output_dir": "./checkpoints",
     }

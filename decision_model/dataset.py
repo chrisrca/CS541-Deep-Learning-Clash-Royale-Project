@@ -172,10 +172,13 @@ class ClashRoyaleDataset(Dataset):
         # Parse card name and convert to ID
         card_name = data["card"][0]
         
-        if card_name in CARD_TO_ID:
+        # Action label: 0 = no-op (None), 1 = play a card
+        if card_name == "None":
+            action = 0
+            card_id = -1  # Will be ignored in card loss when action=0
+        elif card_name in CARD_TO_ID:
+            action = 1
             card_id = CARD_TO_ID[card_name]
-        elif card_name == "None":
-            card_id = len(CARD_TO_ID)
         else:
             raise ValueError(f"Unknown card name: {card_name}")
 
@@ -199,8 +202,8 @@ class ClashRoyaleDataset(Dataset):
         # Check if hand column is missing
         if "hand" not in data:
             # Mark all cards as in hand and all cards as playable
-            playable_mask = torch.ones(self.num_cards + 1, dtype=torch.float32)
-            hand_mask = torch.ones(self.num_cards + 1, dtype=torch.float32)
+            playable_mask = torch.ones(self.num_cards, dtype=torch.float32)
+            hand_mask = torch.ones(self.num_cards, dtype=torch.float32)
             print("WARNING: Hand data is missing from the dataset. Applying no masking.")
         else:
             hand_mask_ids = []
@@ -230,26 +233,24 @@ class ClashRoyaleDataset(Dataset):
                     raise ValueError(f"Unknown card name: {c}")
 
             playable_mask_ids = torch.tensor(playable_mask_ids, dtype=torch.long)
-            # Allocate an extra slot for the No-Op action at index self.num_cards.
-            playable_mask = torch.zeros(self.num_cards + 1, dtype=torch.float32)
+            playable_mask = torch.zeros(self.num_cards, dtype=torch.float32)
             playable_mask[playable_mask_ids] = 1.0
-            # No-Op is always legal
-            playable_mask[-1] = 1.0
 
             hand_mask_ids = torch.tensor(hand_mask_ids, dtype=torch.long)
-            hand_mask = torch.zeros(self.num_cards + 1, dtype=torch.float32)
+            hand_mask = torch.zeros(self.num_cards, dtype=torch.float32)
             hand_mask[hand_mask_ids] = 1.0
         
         elixir = float(data["elixir"][0]) if "elixir" in data else 10.0
-        blue_left_princess_tower_health = int(data["blue_left_princess_tower_health"][0]) if "blue_left_princess_tower_health" in data else 3000
-        blue_right_princess_tower_health = int(data["blue_right_princess_tower_health"][0]) if "blue_right_princess_tower_health" in data else 3000
-        blue_king_tower_health = int(data["blue_king_tower_health"][0]) if "blue_king_tower_health" in data else 5000
-        red_left_princess_tower_health = int(data["red_left_princess_tower_health"][0]) if "red_left_princess_tower_health" in data else 3000
-        red_right_princess_tower_health = int(data["red_right_princess_tower_health"][0]) if "red_right_princess_tower_health" in data else 3000
-        red_king_tower_health = int(data["red_king_tower_health"][0]) if "red_king_tower_health" in data else 5000
 
-        numeric_features = torch.tensor([elixir, blue_left_princess_tower_health, blue_right_princess_tower_health, blue_king_tower_health, red_left_princess_tower_health, red_right_princess_tower_health, red_king_tower_health], dtype=torch.float32)
-        label_card = torch.tensor(card_id, dtype=torch.int32)
+        # Normalize numeric features to [0, 1] range to avoid overwhelming LayerNorm
+        # Elixir is 0-10
+        norm_elixir = elixir / 10.0
+
+        numeric_features = torch.tensor([
+            norm_elixir
+        ], dtype=torch.float32)
+        label_action = torch.tensor(action, dtype=torch.long)
+        label_card = torch.tensor(card_id, dtype=torch.long)
         label_placement = torch.tensor(tile_index, dtype=torch.long)
 
         return {
@@ -257,6 +258,7 @@ class ClashRoyaleDataset(Dataset):
             "playable_mask": playable_mask,
             "hand_mask": hand_mask,
             "numeric_features": numeric_features,
+            "label_action": label_action,
             "label_card": label_card,
             "label_placement": label_placement,
         }
