@@ -7,3 +7,8 @@ __pycache__
 *.parquet
 __pycache__/
 wandb/
+*.mp4
+HUGGING_KEY.txt
+*.zip
+potential_new_cards/*
+venv/*
