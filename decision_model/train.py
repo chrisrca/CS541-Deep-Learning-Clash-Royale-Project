@@ -239,6 +239,7 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
     total_card_loss = 0.0
     total_place_loss = 0.0
     total_batches = 0
+    total_place_batches = 0  # Track batches with valid placement loss (not all no-ops)
     
     # Collect all predictions and labels for F1/precision/recall
     all_preds = []
@@ -278,11 +279,18 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
 
             card_loss = card_loss_fn(card_logits, labels_card)
             place_loss = place_loss_fn(relevant_placement_logits, labels_placement)
-            loss = card_loss + place_loss
+            
+            # Skip placement loss for all-no-op batches (results in NaN)
+            if torch.isnan(place_loss):
+                loss = card_loss
+                total_card_loss += card_loss.item()
+            else:
+                loss = card_loss + place_loss
+                total_card_loss += card_loss.item()
+                total_place_loss += place_loss.item()
+                total_place_batches += 1
 
             total_loss += loss.item()
-            total_card_loss += card_loss.item()
-            total_place_loss += place_loss.item()
             total_batches += 1
 
             # Collect predictions and labels for metrics
@@ -292,7 +300,7 @@ def evaluate(model, data_loader, card_loss_fn, place_loss_fn, device, config, ep
 
     avg_loss = total_loss / max(total_batches, 1)
     avg_card = total_card_loss / max(total_batches, 1)
-    avg_place = total_place_loss / max(total_batches, 1)
+    avg_place = total_place_loss / max(total_place_batches, 1)
 
     # Convert to binary: None (no-op) = 0 (negative), any card = 1 (positive)
     binary_preds = [0 if p == none_class_idx else 1 for p in all_preds]
