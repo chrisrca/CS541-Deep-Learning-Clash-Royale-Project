@@ -89,11 +89,11 @@ def upload_worker():
                             continue
 
             if not pending:
-                print("[UPLOAD] Queue empty — sleeping 10 min")
+                print("[UPLOAD] Queue empty - sleeping 10 min")
                 time.sleep(600)
                 continue
 
-            for serial, replay_dir, arena_idx, replay_id in pending:
+            for _, replay_dir, arena_idx, replay_id in pending:
                 print(f"[UPLOAD] Uploading {replay_id} from arena {arena_idx:02d}")
                 try:
                     padded = f"arena_{arena_idx:02d}"
