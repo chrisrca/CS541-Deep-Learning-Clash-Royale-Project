@@ -1,7 +1,6 @@
 import time
 import cv2
 import os
-import random
 import numpy as np
 import torch
 
@@ -68,18 +67,18 @@ class ClashBot():
             
     def play(self, serial):
         while not self.is_match_over(serial):
-            frame = self.mumu.get_screen(serial)
+            screen_capture = self.mumu.get_screen(serial)
     
             # Get current elixir
             elixir = CRGameState.current_elixir(
-                screenshot=frame,
+                screenshot=screen_capture,
                 elixir_images=elixir_templates,
                 confidence=0.5
             )
 
             # Get cards in hand
             cards = CRGameState.cards_in_hand(
-                screenshot=frame,
+                screenshot=screen_capture,
                 card_images=card_templates,
                 current_elixir=elixir,
                 confidence_color=0.6,
@@ -117,8 +116,9 @@ class ClashBot():
             hand_mask = hand_mask.unsqueeze(0)  # Add batch dimension
             playable_mask = playable_mask.unsqueeze(0)  # Add batch dimension
 
+            input = CRElement.cut_to_fit(image=screen_capture, box=CRElement.arena_match, rescale=CRElement.arena)
 
-            t = torch.from_numpy(frame.astype(np.float32))
+            t = torch.from_numpy(input.astype(np.float32))
 
             t = t.permute(2, 0, 1)
             frames = t[None, None, ...]
@@ -153,8 +153,13 @@ class ClashBot():
             if choice is not None and choice in cards:
                 selected_index = cards.index(choice)
                 self.select_card(serial, selected_index + 1)
-                x, y = random.randrange(BATTLE_PLACE_REGION[1].start, BATTLE_PLACE_REGION[1].stop), random.randrange(BATTLE_PLACE_REGION[0].start, BATTLE_PLACE_REGION[0].stop)
-                self.place_card(serial, x, y)
+                placement_logits = prediction['placement_logits'][0, ALL_CARDS.index(choice)]
+                placement_choice = torch.argmax(placement_logits)
+                placement_x = placement_choice % 18
+                placement_y = placement_choice // 18
+                print(f"| Placement: {placement_x}, {placement_y}")
+                self.place_card(serial, placement_x, placement_y)
+
 
             time.sleep(0.08)
 
@@ -230,6 +235,10 @@ class ClashBot():
             print(f"Invalid card selection: {card}")
 
     def place_card(self, serial, x: int, y: int):
+        arena_x_size = BATTLE_PLACE_REGION[1].stop - BATTLE_PLACE_REGION[1].start
+        arena_y_size = BATTLE_PLACE_REGION[0].stop - BATTLE_PLACE_REGION[0].start
+        x = BATTLE_PLACE_REGION[1].start + int(x / 18 * arena_x_size)
+        y = BATTLE_PLACE_REGION[0].start + int(y / 32 * arena_y_size)
         self.mumu.tap(serial, x, y)
 
 ClashBot()

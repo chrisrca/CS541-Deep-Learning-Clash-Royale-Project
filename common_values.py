@@ -43,9 +43,9 @@ ALL_CARDS = [
     "caged_goblin", "cannon", "cannon_cart", "clone", "dark_prince", "dart_goblin", "e_barbs", "e_wiz", 
     "earthquake", "electro_dragon", "electro_giant", "electro_spirit", "elixir_golem", "elixir_pump", "empty", 
     "evo_archers", "evo_baby_dragon", "evo_barbs", "evo_bats", "evo_battle_ram", "evo_bomber", "evo_cannon", "evo_dart_goblin",
-    "evo_electro_dragon", "evo_executioner", "evo_firecracker", "evo_ghost", "evo_goblin_barrel", "evo_goblin_cage", 
-    "evo_goblin_drill", "evo_goblin_giant", "evo_ice_spirit", "evo_inferno_dragon", "evo_knight", "evo_lumberjack", "evo_mortar", 
-    "evo_musketeer", "evo_royal_giant", "evo_royal_hogs", "evo_royal_recruit", "evo_skele_barrel", 
+    "evo_electro_dragon", "evo_executioner", "evo_firecracker", "evo_furnace", "evo_ghost", "evo_goblin_barrel", "evo_goblin_cage", 
+    "evo_goblin_drill", "evo_goblin_giant", "evo_hunter", "evo_ice_spirit", "evo_inferno_dragon", "evo_knight", "evo_lumberjack", "evo_mega_knight", "evo_mortar", 
+    "evo_musketeer", "evo_pekka", "evo_royal_giant", "evo_royal_hogs", "evo_royal_recruit", "evo_skele_barrel", 
     "evo_skeletion_army", "evo_skeletons", "evo_snowball", "evo_tesla_coil", "evo_valk", "evo_wallbreakers", 
     "evo_witch", "evo_wizard", "evo_zap", "executioner", "fire_spirit", "fireball", "firecracker", "fisherman", 
     "flying_machine", "freeze", "furnace", "ghost", "giant", "giant_skeleton", "goblin_barrel", "goblin_curse", 
@@ -55,7 +55,7 @@ ALL_CARDS = [
     "little_prince", "log", "lumberjack", "magic_archer", "mega_knight", "mega_minion", "mega_miner", "mighty_miner", 
     "miner", "mini_pekka", "minion_horde", "minions", "monk", "mortar", "mother_witch", "musketeer", "musketeers", 
     "night_witch", "pekka", "phoenix", "poison", "prince", "princess", "rage", "ram_rider", "rascals", "rocket", 
-    "royal_delivery", "royal_giant", "royal_hogs", "royal_recruits", "skarmy", "skele_barrel", "skeleton_dragons", 
+    "royal_delivery", "royal_giant", "royal_hogs", "royal_recruits", "rune_giant", "skarmy", "skele_barrel", "skeleton_dragons", 
     "skeleton_king", "skeletons", "snowball", "sparky", "spear_goblins", "spirit_empress", "spirit_empress_dragon", "tesla_coil", "tombstone", "tornado", 
     "valk", "vines", "void", "wallbreakers", "witch", "wizard", "xbow", "zap", "zappies"
 ]
