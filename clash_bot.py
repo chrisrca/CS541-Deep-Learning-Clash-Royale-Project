@@ -73,7 +73,8 @@ class ClashBot():
             elixir = CRGameState.current_elixir(
                 screenshot=screen_capture,
                 elixir_images=elixir_templates,
-                confidence=0.5
+                confidence=0.5,
+                is_match=True
             )
 
             # Get cards in hand
