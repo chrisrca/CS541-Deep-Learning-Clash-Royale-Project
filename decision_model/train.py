@@ -32,7 +32,7 @@ def build_dataloaders(config, device):
     # hf_repo_type = config.get("hf_repo_type", "dataset")
     # parquet_paths = get_hf_parquet_local_paths(hf_repo_id, repo_type=hf_repo_type)
 
-    parquet_paths = ["./new_arena_placement.parquet", "./Nones_arena_21.parquet", "./Nones_arena_22.parquet"]
+    parquet_paths = ["./new_arena_placement.parquet", "training_offset_1_arena31.parquet", "./Nones_arena_21.parquet", "./Nones_arena_22.parquet", "./Nones_arena_23.parquet"]
     dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
 
     val_ratio = config.get("val_ratio", 0.1)
@@ -80,16 +80,7 @@ def compute_action_pos_weight(dataset, device):
     pos_weight = num_negative / num_positive
     This gives higher weight to the minority class.
     """
-    num_positive = 0  # action = 1 (play a card)
-    num_negative = 0  # action = 0 (no-op)
-    
-    for idx in range(len(dataset)):
-        sample = dataset[idx]
-        action = sample["label_action"].item()
-        if action == 1:
-            num_positive += 1
-        else:
-            num_negative += 1
+    num_positive, num_negative = dataset.get_action_distribution()
     
     if num_positive == 0:
         pos_weight = 1.0
