@@ -119,7 +119,7 @@ def build_model(config, device):
     return model.to(device)
 
 
-def train_one_epoch(model, train_loader, optimizer, action_loss_fn, card_loss_fn, place_loss_fn, device, config, epoch, rolling_losses=None, scaler=None, use_amp=False):  # type: ignore[type-arg]
+def train_one_epoch(model, train_loader, optimizer, action_loss_fn, card_loss_fn, place_loss_fn, device, config, epoch, rolling_losses=None, scaler=None, use_amp=False, scheduler=None):  # type: ignore[type-arg]
     """Train for one epoch with optional mixed precision."""
     assert scaler is not None, "scaler must be provided"
     
@@ -226,6 +226,10 @@ def train_one_epoch(model, train_loader, optimizer, action_loss_fn, card_loss_fn
 
         scaler.step(optimizer)
         scaler.update()
+
+        # Step scheduler per batch if provided
+        if scheduler is not None:
+            scheduler.step()
 
         total_loss += loss.item()
         total_action_loss += action_loss.item()
@@ -442,17 +446,40 @@ def run_training(game_config, hyperparameter_config, runtime_config):
         card_loss_fn = nn.CrossEntropyLoss()     # Multi-class: which card
         place_loss_fn = nn.CrossEntropyLoss()    # Placement on grid
 
+        # Separate parameters into groups
+        backbone_params = list(model.backbone.parameters()) + list(model.convlstm.parameters())
+        action_params = list(model.action_head_mlp.parameters())
+        card_params = list(model.card_head_mlp.parameters())
+        
+        # Placement head consists of multiple components
+        place_params = (
+            list(model.place_reduce_conv.parameters()) + 
+            list(model.place_conv_block.parameters()) + 
+            list(model.place_logits.parameters())
+        )
+
+        base_lr = config["learning_rate"]
+        
         optimizer = optim.AdamW(
-            model.parameters(),
-            lr=config["learning_rate"],
+            [
+                {"params": backbone_params, "lr": config.get("lr_backbone", base_lr)},
+                {"params": action_params, "lr": config.get("lr_action", base_lr)},
+                {"params": card_params, "lr": config.get("lr_card", base_lr)},
+                {"params": place_params, "lr": config.get("lr_place", base_lr)},
+            ],
+            lr=base_lr, # Fallback
             weight_decay=config.get("weight_decay", 0.0),
         )
 
         scheduler = None
         if config.get("use_scheduler", False):
+            # Calculate total steps for CosineAnnealingLR
+            steps_per_epoch = len(train_loader)
+            total_steps = config["num_epochs"] * steps_per_epoch
+            
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
-                T_max=config["num_epochs"],
+                T_max=total_steps,
             )
 
         # Use automatic mixed precision for faster training and lower memory
@@ -460,6 +487,8 @@ def run_training(game_config, hyperparameter_config, runtime_config):
         scaler = torch.amp.GradScaler("cuda", enabled=use_amp) # type: ignore
 
         best_val_loss = float("inf")
+        epochs_without_improvement = 0
+        early_stopping_patience = config.get("early_stopping_patience", 5)
 
         # Persistent rolling average dict across epochs
         rolling_losses = None
@@ -478,6 +507,7 @@ def run_training(game_config, hyperparameter_config, runtime_config):
                 rolling_losses,
                 scaler=scaler,
                 use_amp=use_amp,
+                scheduler=scheduler,  # Pass scheduler to step per batch
             )
 
             val_loss = evaluate(
@@ -492,14 +522,17 @@ def run_training(game_config, hyperparameter_config, runtime_config):
                 "val",
             )
 
-            if scheduler is not None:
-                scheduler.step()
-
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
+                epochs_without_improvement = 0
                 save_path = os.path.join(config.get("output_dir", "./checkpoints"), "best_model.pt")
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 torch.save({"model_state_dict": model.state_dict(), "config": dict(config)}, save_path)
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= early_stopping_patience:
+                    print(f"Early stopping triggered after {epoch + 1} epochs (no improvement for {early_stopping_patience} epochs)")
+                    break
 
         # final test evaluation
         test_loss = evaluate(
@@ -526,7 +559,7 @@ if __name__ == "__main__":
     
     hyperparameter_config = {
         "batch_size": 16,
-        "num_epochs": 5,
+        "num_epochs": 10,
         "learning_rate": 6e-4,
         "weight_decay": 1e-2,
         "use_scheduler": True,
@@ -535,6 +568,13 @@ if __name__ == "__main__":
         "convlstm_hidden": 128,
         "backbone_proj_channels": 128,
         "backbone_pretrained": True,
+        
+        # Component-specific learning rates
+        "lr_backbone": 6e-4,
+        "lr_action": 6e-4,
+        "lr_card": 1e-3,
+        "lr_place": 1e-3,
+        "early_stopping_patience": 5,
     }
 
     # runtime-only parameters (not tracked by wandb)
