@@ -18,8 +18,11 @@ config = {
     "grid_h": 32,
     "grid_w": 18,
     "numeric_feat_dim": 1,
-    "convlstm_hidden": 128,
-    "backbone_proj_channels": 128,
+    "convlstm_hidden": 64,
+    "backbone_proj_channels": 64,
+    "transformer_layers": 2,
+    "transformer_heads": 4,
+    "transformer_dropout": 0.1,
     "val_ratio": 0.1,
     "test_ratio": 0.1,
 }
