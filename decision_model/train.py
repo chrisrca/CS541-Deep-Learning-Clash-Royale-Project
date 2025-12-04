@@ -115,6 +115,10 @@ def build_model(config, device):
         convlstm_hidden=convlstm_hidden,
         pretrained_backbone_weights=pretrained_weights,
         backbone_proj_channels=backbone_proj_channels,
+        use_transformer=config.get("use_transformer", False),
+        transformer_layers=config.get("transformer_layers", 2),
+        transformer_heads=config.get("transformer_heads", 4),
+        transformer_dropout=config.get("transformer_dropout", 0.1),
     )
     return model.to(device)
 
@@ -448,6 +452,12 @@ def run_training(game_config, hyperparameter_config, runtime_config):
 
         # Separate parameters into groups
         backbone_params = list(model.backbone.parameters()) + list(model.convlstm.parameters())
+        
+        # Include transformer params if present
+        if hasattr(model, 'transformer') and model.use_transformer:
+            backbone_params += list(model.transformer.parameters())
+            backbone_params += list(model.pos_encoding.parameters())
+        
         action_params = list(model.action_head_mlp.parameters())
         card_params = list(model.card_head_mlp.parameters())
         
@@ -467,7 +477,7 @@ def run_training(game_config, hyperparameter_config, runtime_config):
                 {"params": card_params, "lr": config.get("lr_card", base_lr)},
                 {"params": place_params, "lr": config.get("lr_place", base_lr)},
             ],
-            lr=base_lr, # Fallback
+            lr=base_lr,
             weight_decay=config.get("weight_decay", 0.0),
         )
 
@@ -565,16 +575,22 @@ if __name__ == "__main__":
         "use_scheduler": True,
         "max_grad_norm": 1.0,
         "frames_per_sample": 1,
-        "convlstm_hidden": 128,
-        "backbone_proj_channels": 128,
+        "convlstm_hidden": 64,
+        "backbone_proj_channels": 64,
         "backbone_pretrained": True,
+        "early_stopping_patience": 5,
+
+        # Transformer parameters
+        "use_transformer": True,
+        "transformer_layers": 2,
+        "transformer_heads": 4,
+        "transformer_dropout": 0.1,
         
         # Component-specific learning rates
-        "lr_backbone": 6e-4,
-        "lr_action": 6e-4,
-        "lr_card": 1e-3,
-        "lr_place": 1e-3,
-        "early_stopping_patience": 5,
+        # "lr_backbone": 6e-4,
+        # "lr_action": 6e-4,
+        # "lr_card": 6e-4,
+        # "lr_place": 6e-4,
     }
 
     # runtime-only parameters (not tracked by wandb)
