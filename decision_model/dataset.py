@@ -46,8 +46,8 @@ SPELL_CARDS = {
 
 # Grid discretization parameters (pixel to tile conversion)
 # These define the playable area within the image
-IMAGE_WIDTH = 432
-IMAGE_HEIGHT = 680
+IMAGE_WIDTH = 428
+IMAGE_HEIGHT = 683
 Y_OFFSET_TOP = 62
 Y_OFFSET_BOTTOM = 7
 X_OFFSET_LEFT = 0
