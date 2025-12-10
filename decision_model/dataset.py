@@ -1,4 +1,5 @@
 import io
+import os
 import numpy as np
 import torch
 from PIL import Image
@@ -71,7 +72,7 @@ class ClashRoyaleDataset(Dataset):
         if not self.files:
             raise ValueError("No parquet files provided to ClashRoyaleDataset")
 
-        print(f"Loading {len(self.files)} parquet files (lazy)...")
+        print(f"Loading {len(self.files)} parquet files...")
         self.tables = []
         self.valid_indices_list = []
         
@@ -149,6 +150,7 @@ class ClashRoyaleDataset(Dataset):
 
             self.tables.append(table)
             self.valid_indices_list.append(final_valid_indices)
+            print(f"File: {os.path.basename(path)} | Total: {num_rows} | Kept: {len(final_valid_indices)}")
         
         # Calculate cumulative lengths for indexing
         self.cumulative_lengths = np.cumsum([len(inds) for inds in self.valid_indices_list])

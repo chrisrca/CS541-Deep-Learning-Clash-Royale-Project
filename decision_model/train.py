@@ -32,7 +32,7 @@ def build_dataloaders(config, device):
     # hf_repo_type = config.get("hf_repo_type", "dataset")
     # parquet_paths = get_hf_parquet_local_paths(hf_repo_id, repo_type=hf_repo_type)
 
-    parquet_paths = ["./new_arena_placement.parquet", "training_offset_1_arena31.parquet", "./Nones_arena_21.parquet", "./Nones_arena_22.parquet", "./Nones_arena_23.parquet"]
+    parquet_paths = ["placement_27_28_29.parquet", "./Nones_27_28_29.parquet"]
     dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
 
     val_ratio = config.get("val_ratio", 0.1)
@@ -376,11 +376,13 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
     action_accuracy = sum(p == l for p, l in zip(all_action_preds, all_action_labels)) / max(len(all_action_preds), 1)
     
     # Card metrics: multi-class (only over samples where action=1)
+    # Using 'weighted' average accounts for class imbalance and ensures F1 is
+    # the harmonic mean of the weighted precision and recall.
     if all_card_labels:
         present_classes = sorted(set(all_card_labels))
-        card_precision = precision_score(all_card_labels, all_card_preds, labels=present_classes, average='macro', zero_division=0)
-        card_recall = recall_score(all_card_labels, all_card_preds, labels=present_classes, average='macro', zero_division=0)
-        card_f1 = f1_score(all_card_labels, all_card_preds, labels=present_classes, average='macro', zero_division=0)
+        card_precision = precision_score(all_card_labels, all_card_preds, labels=present_classes, average='weighted', zero_division=0)
+        card_recall = recall_score(all_card_labels, all_card_preds, labels=present_classes, average='weighted', zero_division=0)
+        card_f1 = f1_score(all_card_labels, all_card_preds, labels=present_classes, average='weighted', zero_division=0)
         card_accuracy = sum(p == l for p, l in zip(all_card_preds, all_card_labels)) / max(len(all_card_preds), 1)
     else:
         card_precision = card_recall = card_f1 = card_accuracy = 0.0
