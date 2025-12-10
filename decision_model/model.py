@@ -106,6 +106,20 @@ class ConvLSTM(nn.Module):
 
 
 # -------------------------
+# Transformer components
+# -------------------------
+class LearnablePositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 100):
+        super().__init__()
+        self.encoding = nn.Parameter(torch.randn(1, max_len, d_model) * 0.02)
+
+    def forward(self, x):
+        # x: (B, T, C)
+        T = x.shape[1]
+        return x + self.encoding[:, :T, :]
+
+
+# -------------------------
 # Backbone wrapper (MobileNetV2)
 # -------------------------
 class MobileNetV2Backbone(nn.Module):
@@ -156,6 +170,10 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         pretrained_backbone_weights: Optional[MobileNet_V2_Weights] = None,
         backbone_proj_channels: int = 128,
         convlstm_kernel: int = 3,
+        use_transformer: bool = True,
+        transformer_layers: int = 2,
+        transformer_heads: int = 4,
+        transformer_dropout: float = 0.1,
     ):
         """
         Args:
@@ -165,6 +183,7 @@ class ConvLSTMClashRoyaleModel(nn.Module):
             convlstm_hidden: hidden channels for ConvLSTM
             pretrained_backbone_weights: MobileNet_V2_Weights to use (e.g., MobileNet_V2_Weights.DEFAULT) or None for no pretrained weights
             backbone_proj_channels: project backbone channels down to this before ConvLSTM
+            use_transformer: whether to use a transformer encoder for global temporal context
         """
         super().__init__()
         self.num_cards = num_cards
@@ -172,6 +191,7 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         self.grid_w = grid_w
         self.grid_cells = grid_h * grid_w
         self.numeric_feat_dim = numeric_feat_dim
+        self.use_transformer = use_transformer
 
         # backbone
         self.backbone = MobileNetV2Backbone(weights=pretrained_backbone_weights, proj_out_channels=backbone_proj_channels)
@@ -181,8 +201,19 @@ class ConvLSTMClashRoyaleModel(nn.Module):
         self.convlstm = ConvLSTM(input_channels=backbone_out_ch, hidden_channels=convlstm_hidden,
                                  kernel_size=convlstm_kernel, padding=convlstm_kernel // 2)
 
+        # Transformer Encoder Branch
+        self.transformer_out_dim = 0
+        if self.use_transformer:
+            self.transformer_out_dim = backbone_out_ch
+            self.pos_encoding = LearnablePositionalEncoding(d_model=backbone_out_ch)
+            encoder_layer = nn.TransformerEncoderLayer(d_model=backbone_out_ch, nhead=transformer_heads,
+                                                       dim_feedforward=backbone_out_ch * 4, dropout=transformer_dropout,
+                                                       batch_first=True)
+            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_layers)
+
         # Shared feature dimension for both heads
-        shared_feat_dim = convlstm_hidden + numeric_feat_dim + num_cards  # +num_cards for hand_mask
+        # We concatenate ConvLSTM pooled output + Transformer output (optional) + numeric + hand
+        shared_feat_dim = convlstm_hidden + self.transformer_out_dim + numeric_feat_dim + num_cards  # +num_cards for hand_mask
         head_hidden = max(128, convlstm_hidden)
         
         # Action head: binary classifier (play vs no-play)
@@ -263,9 +294,28 @@ class ConvLSTMClashRoyaleModel(nn.Module):
 
         # 3) Shared feature computation
         # global-pool h_last -> (B, convlstm_hidden)
-        pooled = F.adaptive_avg_pool2d(h_last, output_size=(1, 1)).view(B, -1)  # (B, convlstm_hidden)
-        # concat numeric feats and hand_mask
-        shared_input = torch.cat([pooled, numeric_feats, hand_mask], dim=1)  # (B, convlstm_hidden + numeric_feat_dim + num_cards)
+        pooled_lstm = F.adaptive_avg_pool2d(h_last, output_size=(1, 1)).view(B, -1)  # (B, convlstm_hidden)
+
+        # Transformer branch
+        transformer_feat = None
+        if self.use_transformer:
+            # Global average pool spatial features: (B, T, backbone_ch, Hf, Wf) -> (B, T, backbone_ch)
+            gap_seq = spatial_seq.mean(dim=[-2, -1])
+            # Add position encoding
+            gap_seq = self.pos_encoding(gap_seq)
+            # Run transformer
+            trans_out = self.transformer(gap_seq) # (B, T, backbone_ch)
+            # Take the last timestep as the summary of the sequence
+            transformer_feat = trans_out[:, -1, :] # (B, backbone_ch)
+
+        # concat features
+        feats_to_concat = [pooled_lstm]
+        if transformer_feat is not None:
+            feats_to_concat.append(transformer_feat)
+        feats_to_concat.append(numeric_feats)
+        feats_to_concat.append(hand_mask)
+
+        shared_input = torch.cat(feats_to_concat, dim=1)  # (B, total_dim)
         
         # 4) Action head: binary play vs no-play decision
         action_logits = self.action_head_mlp(shared_input)  # (B, 1)

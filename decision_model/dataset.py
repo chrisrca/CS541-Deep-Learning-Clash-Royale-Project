@@ -1,17 +1,19 @@
 import io
+import os
 import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pyarrow.compute as pc
 
 # List of known cards derived from file names
 ALL_CARDS = [
     "archer_queen", "archers", "arrows", "baby_dragon", "balloon", "bandit", "barb_barrel", "barb_hut", "barbs", 
     "bats", "battle_ram", "berserker", "bomb_tower", "bomber", "boss_bandit", "bowler", "bush_goblin", 
     "caged_goblin", "cannon", "cannon_cart", "clone", "dark_prince", "dart_goblin", "e_barbs", "e_wiz", 
-    "earthquake", "electro_dragon", "electro_giant", "electro_spirit", "elixir_golem", "elixir_pump", "empty", 
+    "earthquake", "electro_dragon", "electro_giant", "electro_spirit", "elixir_golem", "elixir_pump", 
     "evo_archers", "evo_baby_dragon", "evo_barbs", "evo_bats", "evo_battle_ram", "evo_bomber", "evo_cannon", "evo_dart_goblin",
     "evo_electro_dragon", "evo_executioner", "evo_firecracker", "evo_furnace", "evo_ghost", "evo_goblin_barrel", "evo_goblin_cage", 
     "evo_goblin_drill", "evo_goblin_giant", "evo_hunter", "evo_ice_spirit", "evo_inferno_dragon", "evo_knight", "evo_lumberjack", "evo_mega_knight", "evo_mortar", 
@@ -33,6 +35,14 @@ ALL_CARDS = [
 # Sort to ensure consistent ID mapping
 ALL_CARDS.sort()
 CARD_TO_ID = {name: i for i, name in enumerate(ALL_CARDS)}
+
+# Spell cards to exclude from training/testing
+SPELL_CARDS = {
+    "arrows", "barb_barrel", "clone", "earthquake", "fireball", "freeze", 
+    "goblin_barrel", "goblin_curse", "graveyard", "lightning", "log", "poison", 
+    "rage", "rocket", "royal_delivery", "snowball", "tornado", "void", "zap",
+    "evo_goblin_barrel", "evo_snowball", "evo_zap"
+}
 
 # Grid discretization parameters (pixel to tile conversion)
 # These define the playable area within the image
@@ -62,74 +72,115 @@ class ClashRoyaleDataset(Dataset):
         if not self.files:
             raise ValueError("No parquet files provided to ClashRoyaleDataset")
 
-        print(f"Loading {len(self.files)} parquet files into memory...")
-        tables = []
-        for path in self.files:
-            table = pq.read_table(path)
-            
-            # Add missing x and y columns with default value -1 if they don't exist
-            # Insert after png_bytes column to maintain consistent schema order
-            if "x" not in table.column_names:
-                x_col = pa.array([-1] * table.num_rows, type=pa.int16())
-                # Find the index after png_bytes
-                png_bytes_idx = table.column_names.index("png_bytes") if "png_bytes" in table.column_names else 0
-                table = table.add_column(png_bytes_idx + 1, "x", x_col)
-            if "y" not in table.column_names:
-                y_col = pa.array([-1] * table.num_rows, type=pa.int16())
-                # Find the index after x (which we just added or already exists)
-                x_idx = table.column_names.index("x")
-                table = table.add_column(x_idx + 1, "y", y_col)
-            
-            tables.append(table)
+        print(f"Loading {len(self.files)} parquet files...")
+        self.tables = []
+        self.valid_indices_list = []
         
-        self.table = pa.concat_tables(tables)
-        print(f"Loaded {self.table.num_rows} rows.")
+        for path in self.files:
+            # Read table with memory mapping, NO filters to ensure mapping
+            # We handle filtering via indices to avoid loading data into memory
+            table = pq.read_table(path, memory_map=True)
+            
+            num_rows = table.num_rows
+            valid_mask = np.ones(num_rows, dtype=bool)
 
-        # Filter out samples with invalid hand data
-        print("Filtering out samples with invalid data...")
-        self.valid_indices = []
+            # 1. Filter by offset
+            if "offset" in table.column_names:
+                is_zero_offset = pc.equal(table.column("offset"), 0).to_numpy(zero_copy_only=False)
+                valid_mask &= is_zero_offset
+                # Remove offset column to match original schema (creates new table structure but shares data)
+                table = table.drop(["offset"])
+            
+            # 2. Filter Spells
+            if "card" in table.column_names:
+                is_spell = pc.is_in(table.column("card"), value_set=pa.array(list(SPELL_CARDS)))
+                is_not_spell = pc.invert(is_spell).to_numpy(zero_copy_only=False)
+                valid_mask &= is_not_spell
+            
+            # 3. Add missing x and y columns with default value -1 if they don't exist
+            if "x" not in table.column_names:
+                # Insert after png_bytes
+                png_bytes_idx = table.column_names.index("png_bytes") if "png_bytes" in table.column_names else 0
+                x_col = pa.array([-1] * table.num_rows, type=pa.int16())
+                table = table.add_column(png_bytes_idx + 1, "x", x_col)
+            
+            if "y" not in table.column_names:
+                x_idx = table.column_names.index("x")
+                y_col = pa.array([-1] * table.num_rows, type=pa.int16())
+                table = table.add_column(x_idx + 1, "y", y_col)
 
-        for i in range(self.table.num_rows):
-            row_table = self.table.slice(i, 1)
-            data = row_table.to_pydict()
-            card_played = data["card"][0]
+            # Filter invalid placement (card != None AND x=-1, y=-1)
+            c_col = table.column("card")
+            x_col = table.column("x")
+            y_col = table.column("y")
+            
+            is_played = pc.not_equal(c_col, "None")
+            bad_pos = pc.and_(pc.equal(x_col, -1), pc.equal(y_col, -1))
+            bad_rows = pc.and_(is_played, bad_pos)
+            is_good_row = pc.invert(bad_rows).to_numpy(zero_copy_only=False)
+            valid_mask &= is_good_row
+            
+            # 4. Filter out samples with invalid hand data
+            if "hand" in table.column_names:
+                # Get indices of rows that are valid so far
+                current_indices = np.nonzero(valid_mask)[0]
+                
+                if len(current_indices) > 0:
+                    # Only load 'hand' and 'card' for these rows to validate
+                    hands = table.column("hand").take(current_indices).to_pylist()
+                    cards = table.column("card").take(current_indices).to_pylist()
+                    
+                    kept_indices_local = []
+                    
+                    for i, (hand, card_played) in enumerate(zip(hands, cards)):
+                         # Check if hand column has 4 entries
+                        if len(hand) != 4:
+                            continue
+                        # Check if card played is in hand
+                        if card_played != "None" and card_played not in hand:
+                            continue
+                        kept_indices_local.append(i)
+                    
+                    # Map local indices back to global indices
+                    final_valid_indices = current_indices[kept_indices_local]
+                else:
+                    final_valid_indices = np.array([], dtype=np.int64)
+            else:
+                final_valid_indices = np.nonzero(valid_mask)[0]
 
-            # Validate hand data if present
-            if "hand" in data:
-                # Check if hand column has 4 entries
-                cards_in_hand = data["hand"][0]
-                if len(cards_in_hand) != 4:
-                    continue
-
-                # Check if card played is in hand
-                if card_played != "None" and card_played not in cards_in_hand:
-                    continue
-
-            # Exclude samples where card was played but placement is unknown (-1, -1)
-            # This indicates low confidence in placement detection
-            # Note: x and y columns may be missing entirely when card is "None"
-            if card_played != "None":
-                x_val = int(data["x"][0]) if "x" in data else -1
-                y_val = int(data["y"][0]) if "y" in data else -1
-                if x_val == -1 and y_val == -1:
-                    continue
-
-            # Keep sample if it has a valid hand
-            self.valid_indices.append(i)
-
-        print(f"Kept {len(self.valid_indices)} valid samples out of {self.table.num_rows} total samples.")
-
-        # Count percentage of "None" (no-op) samples in the valid dataset
-        none_count = 0
-        for idx in self.valid_indices:
-            card_val = self.table.column("card")[idx].as_py()
-            if card_val == "None":
-                none_count += 1
-        none_percentage = (none_count / len(self.valid_indices) * 100) if self.valid_indices else 0
-        print(f"No-op (None) samples: {none_count}/{len(self.valid_indices)} ({none_percentage:.2f}%)")
+            self.tables.append(table)
+            self.valid_indices_list.append(final_valid_indices)
+            print(f"File: {os.path.basename(path)} | Total: {num_rows} | Kept: {len(final_valid_indices)}")
+        
+        # Calculate cumulative lengths for indexing
+        self.cumulative_lengths = np.cumsum([len(inds) for inds in self.valid_indices_list])
+        total_len = self.cumulative_lengths[-1] if len(self.cumulative_lengths) > 0 else 0
+        print(f"Total samples loaded: {total_len}")
 
     def __len__(self) -> int:
-        return len(self.valid_indices)
+        return self.cumulative_lengths[-1] if len(self.cumulative_lengths) > 0 else 0
+
+    def get_action_distribution(self):
+        """Efficiently count positive (play card) and negative (no-op) samples."""
+        num_negative = 0
+        num_total = len(self)
+        
+        for table, indices in zip(self.tables, self.valid_indices_list):
+            if len(indices) == 0:
+                continue
+                
+            # "card" column contains the label
+            # "None" is negative, everything else is positive
+            if "card" in table.column_names:
+                # Count occurrences of "None" in valid rows
+                cards = table.column("card").take(indices)
+                is_none = pc.equal(cards, "None")
+                # sum() of boolean array gives count of True
+                none_in_table = pc.sum(is_none).as_py()
+                num_negative += none_in_table
+        
+        num_positive = num_total - num_negative
+        return num_positive, num_negative
 
     def __getitem__(self, idx: int):
         if idx < 0:
@@ -137,35 +188,30 @@ class ClashRoyaleDataset(Dataset):
         if idx < 0 or idx >= len(self):
             raise IndexError(idx)
 
-        # Map to actual table index
-        table_idx = self.valid_indices[idx]
+        # Find which table contains the index
+        table_idx = np.searchsorted(self.cumulative_lengths, idx, side='right')
+        
+        if table_idx == 0:
+            row_idx = idx
+        else:
+            row_idx = idx - self.cumulative_lengths[table_idx - 1]
 
-        # Slicing the in-memory table is efficient
-        row_table = self.table.slice(table_idx, 1)
+        # Retrieve row from the specific table
+        table = self.tables[table_idx]
+        real_row_idx = self.valid_indices_list[table_idx][row_idx]
+        
+        # Slice using the real index from the memory-mapped table
+        row_table = table.slice(real_row_idx, 1)
         data = row_table.to_pydict()
 
         # Decode the image from bytes
         raw_image_bytes = data["png_bytes"][0]
-        
-        frame_list = []
-        if isinstance(raw_image_bytes, (list, np.ndarray)):
-            # Multiple frames
-            for b in raw_image_bytes:
-                img = Image.open(io.BytesIO(b))
-                t = torch.from_numpy(np.array(img).astype(np.float32))
-                # (H, W, C) -> (C, H, W)
-                if t.ndim == 3 and t.shape[-1] in (1, 3):
-                    t = t.permute(2, 0, 1)
-                frame_list.append(t)
-            frames = torch.stack(frame_list, dim=0) # (T, C, H, W)
-        else:
-            # Single frame
-            img = Image.open(io.BytesIO(raw_image_bytes))
-            t = torch.from_numpy(np.array(img).astype(np.float32))
-            # (H, W, C) -> (C, H, W)
-            if t.ndim == 3 and t.shape[-1] in (1, 3):
-                t = t.permute(2, 0, 1)
-            frames = t.unsqueeze(0) # (1, C, H, W)
+        img = Image.open(io.BytesIO(raw_image_bytes))
+        t = torch.from_numpy(np.array(img).astype(np.float32))
+        # (H, W, C) -> (C, H, W)
+        if t.ndim == 3 and t.shape[-1] in (1, 3):
+            t = t.permute(2, 0, 1)
+        frames = t.unsqueeze(0) # (1, C, H, W)
 
         frames = frames / 255.0
 

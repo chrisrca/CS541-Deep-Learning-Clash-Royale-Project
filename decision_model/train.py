@@ -32,7 +32,7 @@ def build_dataloaders(config, device):
     # hf_repo_type = config.get("hf_repo_type", "dataset")
     # parquet_paths = get_hf_parquet_local_paths(hf_repo_id, repo_type=hf_repo_type)
 
-    parquet_paths = ["./new_arena_placement.parquet", "./Nones_arena_21.parquet", "./Nones_arena_22.parquet"]
+    parquet_paths = ["placement_27_28_29.parquet", "./Nones_27_28_29.parquet"]
     dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
 
     val_ratio = config.get("val_ratio", 0.1)
@@ -80,16 +80,7 @@ def compute_action_pos_weight(dataset, device):
     pos_weight = num_negative / num_positive
     This gives higher weight to the minority class.
     """
-    num_positive = 0  # action = 1 (play a card)
-    num_negative = 0  # action = 0 (no-op)
-    
-    for idx in range(len(dataset)):
-        sample = dataset[idx]
-        action = sample["label_action"].item()
-        if action == 1:
-            num_positive += 1
-        else:
-            num_negative += 1
+    num_positive, num_negative = dataset.get_action_distribution()
     
     if num_positive == 0:
         pos_weight = 1.0
@@ -124,11 +115,15 @@ def build_model(config, device):
         convlstm_hidden=convlstm_hidden,
         pretrained_backbone_weights=pretrained_weights,
         backbone_proj_channels=backbone_proj_channels,
+        use_transformer=config.get("use_transformer", False),
+        transformer_layers=config.get("transformer_layers", 2),
+        transformer_heads=config.get("transformer_heads", 4),
+        transformer_dropout=config.get("transformer_dropout", 0.1),
     )
     return model.to(device)
 
 
-def train_one_epoch(model, train_loader, optimizer, action_loss_fn, card_loss_fn, place_loss_fn, device, config, epoch, rolling_losses=None, scaler=None, use_amp=False):  # type: ignore[type-arg]
+def train_one_epoch(model, train_loader, optimizer, action_loss_fn, card_loss_fn, place_loss_fn, device, config, epoch, rolling_losses=None, scaler=None, use_amp=False, scheduler=None):  # type: ignore[type-arg]
     """Train for one epoch with optional mixed precision."""
     assert scaler is not None, "scaler must be provided"
     
@@ -235,6 +230,10 @@ def train_one_epoch(model, train_loader, optimizer, action_loss_fn, card_loss_fn
 
         scaler.step(optimizer)
         scaler.update()
+
+        # Step scheduler per batch if provided
+        if scheduler is not None:
+            scheduler.step()
 
         total_loss += loss.item()
         total_action_loss += action_loss.item()
@@ -377,11 +376,13 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
     action_accuracy = sum(p == l for p, l in zip(all_action_preds, all_action_labels)) / max(len(all_action_preds), 1)
     
     # Card metrics: multi-class (only over samples where action=1)
+    # Using 'weighted' average accounts for class imbalance and ensures F1 is
+    # the harmonic mean of the weighted precision and recall.
     if all_card_labels:
         present_classes = sorted(set(all_card_labels))
-        card_precision = precision_score(all_card_labels, all_card_preds, labels=present_classes, average='macro', zero_division=0)
-        card_recall = recall_score(all_card_labels, all_card_preds, labels=present_classes, average='macro', zero_division=0)
-        card_f1 = f1_score(all_card_labels, all_card_preds, labels=present_classes, average='macro', zero_division=0)
+        card_precision = precision_score(all_card_labels, all_card_preds, labels=present_classes, average='weighted', zero_division=0)
+        card_recall = recall_score(all_card_labels, all_card_preds, labels=present_classes, average='weighted', zero_division=0)
+        card_f1 = f1_score(all_card_labels, all_card_preds, labels=present_classes, average='weighted', zero_division=0)
         card_accuracy = sum(p == l for p, l in zip(all_card_preds, all_card_labels)) / max(len(all_card_preds), 1)
     else:
         card_precision = card_recall = card_f1 = card_accuracy = 0.0
@@ -451,17 +452,46 @@ def run_training(game_config, hyperparameter_config, runtime_config):
         card_loss_fn = nn.CrossEntropyLoss()     # Multi-class: which card
         place_loss_fn = nn.CrossEntropyLoss()    # Placement on grid
 
+        # Separate parameters into groups
+        backbone_params = list(model.backbone.parameters()) + list(model.convlstm.parameters())
+        
+        # Include transformer params if present
+        if hasattr(model, 'transformer') and model.use_transformer:
+            backbone_params += list(model.transformer.parameters())
+            backbone_params += list(model.pos_encoding.parameters())
+        
+        action_params = list(model.action_head_mlp.parameters())
+        card_params = list(model.card_head_mlp.parameters())
+        
+        # Placement head consists of multiple components
+        place_params = (
+            list(model.place_reduce_conv.parameters()) + 
+            list(model.place_conv_block.parameters()) + 
+            list(model.place_logits.parameters())
+        )
+
+        base_lr = config["learning_rate"]
+        
         optimizer = optim.AdamW(
-            model.parameters(),
-            lr=config["learning_rate"],
+            [
+                {"params": backbone_params, "lr": config.get("lr_backbone", base_lr)},
+                {"params": action_params, "lr": config.get("lr_action", base_lr)},
+                {"params": card_params, "lr": config.get("lr_card", base_lr)},
+                {"params": place_params, "lr": config.get("lr_place", base_lr)},
+            ],
+            lr=base_lr,
             weight_decay=config.get("weight_decay", 0.0),
         )
 
         scheduler = None
         if config.get("use_scheduler", False):
+            # Calculate total steps for CosineAnnealingLR
+            steps_per_epoch = len(train_loader)
+            total_steps = config["num_epochs"] * steps_per_epoch
+            
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
-                T_max=config["num_epochs"],
+                T_max=total_steps,
             )
 
         # Use automatic mixed precision for faster training and lower memory
@@ -469,6 +499,8 @@ def run_training(game_config, hyperparameter_config, runtime_config):
         scaler = torch.amp.GradScaler("cuda", enabled=use_amp) # type: ignore
 
         best_val_loss = float("inf")
+        epochs_without_improvement = 0
+        early_stopping_patience = config.get("early_stopping_patience", 5)
 
         # Persistent rolling average dict across epochs
         rolling_losses = None
@@ -487,6 +519,7 @@ def run_training(game_config, hyperparameter_config, runtime_config):
                 rolling_losses,
                 scaler=scaler,
                 use_amp=use_amp,
+                scheduler=scheduler,  # Pass scheduler to step per batch
             )
 
             val_loss = evaluate(
@@ -501,14 +534,17 @@ def run_training(game_config, hyperparameter_config, runtime_config):
                 "val",
             )
 
-            if scheduler is not None:
-                scheduler.step()
-
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
+                epochs_without_improvement = 0
                 save_path = os.path.join(config.get("output_dir", "./checkpoints"), "best_model.pt")
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 torch.save({"model_state_dict": model.state_dict(), "config": dict(config)}, save_path)
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= early_stopping_patience:
+                    print(f"Early stopping triggered after {epoch + 1} epochs (no improvement for {early_stopping_patience} epochs)")
+                    break
 
         # final test evaluation
         test_loss = evaluate(
@@ -535,15 +571,28 @@ if __name__ == "__main__":
     
     hyperparameter_config = {
         "batch_size": 16,
-        "num_epochs": 5,
+        "num_epochs": 10,
         "learning_rate": 6e-4,
         "weight_decay": 1e-2,
         "use_scheduler": True,
         "max_grad_norm": 1.0,
         "frames_per_sample": 1,
-        "convlstm_hidden": 128,
-        "backbone_proj_channels": 128,
+        "convlstm_hidden": 64,
+        "backbone_proj_channels": 64,
         "backbone_pretrained": True,
+        "early_stopping_patience": 5,
+
+        # Transformer parameters
+        "use_transformer": True,
+        "transformer_layers": 2,
+        "transformer_heads": 4,
+        "transformer_dropout": 0.1,
+        
+        # Component-specific learning rates
+        # "lr_backbone": 6e-4,
+        # "lr_action": 6e-4,
+        # "lr_card": 6e-4,
+        # "lr_place": 6e-4,
     }
 
     # runtime-only parameters (not tracked by wandb)
