@@ -1,16 +1,17 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import random_split
 import os
 import sys
+import argparse
 from PIL import Image as PILImage
 
 # Add project root to path so we can import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from decision_model.model import ConvLSTMClashRoyaleModel
-from decision_model.dataset import ClashRoyaleDataset, ALL_CARDS, Y_OFFSET_TOP, Y_OFFSET_BOTTOM, X_OFFSET_LEFT, X_OFFSET_RIGHT
+from conv_lstm_model import ConvLSTMClashRoyaleModel
+from dataset import ClashRoyaleDataset, ALL_CARDS, Y_OFFSET_TOP, Y_OFFSET_BOTTOM, X_OFFSET_LEFT, X_OFFSET_RIGHT
 
 # Configuration (must match training config)
 config = {
@@ -54,7 +55,7 @@ def load_model(checkpoint_path, config, device):
 
 def get_validation_sample(config):
     """Load dataset and get a random sample from validation set."""
-    parquet_paths = ["./new_arena_placement.parquet"]
+    parquet_paths = ["./placement_27_28_29.parquet"]
     dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
     
     # Split dataset the same way as training
@@ -241,11 +242,15 @@ def visualize_full_output(sample, outputs, config):
     plt.show()
 
 def main():
+    parser = argparse.ArgumentParser(description="Run inference on a Clash Royale sample and visualize outputs.")
+    parser.add_argument("checkpoint_path", type=str, help="Path to the model weights file")
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Load model
-    checkpoint_path = "./checkpoints/best_model.pt"
+    checkpoint_path = args.checkpoint_path
     print(f"Loading model from {checkpoint_path}...")
     model = load_model(checkpoint_path, config, device)
     print("Model loaded successfully.")

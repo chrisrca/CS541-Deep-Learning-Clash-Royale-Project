@@ -62,12 +62,13 @@ TILE_WIDTH = GRID_WIDTH / NUM_COLS
 TILE_HEIGHT = GRID_HEIGHT / NUM_ROWS
 
 class ClashRoyaleDataset(Dataset):
-    def __init__(self, files, grid_w, grid_h, num_cards):
+    def __init__(self, files, grid_w, grid_h, num_cards, single_frame=False):
         super().__init__()
         self.files = list(files)
         self.grid_w = grid_w
         self.grid_h = grid_h
         self.num_cards = num_cards
+        self.single_frame = single_frame
 
         if not self.files:
             raise ValueError("No parquet files provided to ClashRoyaleDataset")
@@ -211,7 +212,11 @@ class ClashRoyaleDataset(Dataset):
         # (H, W, C) -> (C, H, W)
         if t.ndim == 3 and t.shape[-1] in (1, 3):
             t = t.permute(2, 0, 1)
-        frames = t.unsqueeze(0) # (1, C, H, W)
+        
+        if self.single_frame:
+            frames = t
+        else:
+            frames = t.unsqueeze(0) # (1, C, H, W)
 
         frames = frames / 255.0
 
@@ -299,12 +304,18 @@ class ClashRoyaleDataset(Dataset):
         label_card = torch.tensor(card_id, dtype=torch.long)
         label_placement = torch.tensor(tile_index, dtype=torch.long)
 
-        return {
-            "frames": frames,
-            "playable_mask": playable_mask,
-            "hand_mask": hand_mask,
+        result = {
             "numeric_features": numeric_features,
             "label_action": label_action,
             "label_card": label_card,
             "label_placement": label_placement,
+            "playable_mask": playable_mask,
+            "hand_mask": hand_mask,
         }
+
+        if self.single_frame:
+            result["frame"] = frames
+        else:
+            result["frames"] = frames
+            
+        return result
