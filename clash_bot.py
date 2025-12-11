@@ -4,7 +4,7 @@ import os
 import numpy as np
 import torch
 
-from decision_model.model import ConvLSTMClashRoyaleModel
+from decision_model.conv_lstm_model import ConvLSTMClashRoyaleModel
 from cr_detection.cr_element import CRElement
 from cr_detection.cr_gamestate import CRGameState
 from mumu_adb import MuMuADB
@@ -38,7 +38,7 @@ class ClashBot():
             grid_w=18,
         )
 
-        weights = torch.load("decision_model/checkpoints/best_model.pt", map_location=torch.device('cpu'))
+        weights = torch.load("decision_model/checkpoints/best_model_bottom_only.pt", map_location=torch.device('cpu'))
         model.load_state_dict(weights['model_state_dict']) # My laptop doesn't have an NVIDIA GPU
         self.model = model
         self.model.eval()
