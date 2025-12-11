@@ -1,16 +1,17 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import random_split
 import os
 import sys
+import argparse
 from PIL import Image as PILImage
 
 # Add project root to path so we can import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from decision_model.model import ConvLSTMClashRoyaleModel
-from decision_model.dataset import ClashRoyaleDataset, ALL_CARDS, Y_OFFSET_TOP, Y_OFFSET_BOTTOM, X_OFFSET_LEFT, X_OFFSET_RIGHT
+from conv_lstm_model import ConvLSTMClashRoyaleModel
+from dataset import ClashRoyaleDataset, ALL_CARDS, Y_OFFSET_TOP, Y_OFFSET_BOTTOM, X_OFFSET_LEFT, X_OFFSET_RIGHT
 
 # Configuration (must match training config)
 config = {
@@ -54,7 +55,7 @@ def load_model(checkpoint_path, config, device):
 
 def get_validation_sample(config):
     """Load dataset and get a random sample from validation set."""
-    parquet_paths = ["./new_arena_placement.parquet"]
+    parquet_paths = ["./placement_27_28_29.parquet"]
     dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
     
     # Split dataset the same way as training
@@ -73,29 +74,6 @@ def get_validation_sample(config):
     idx = np.random.randint(0, len(val_dataset))
     sample = val_dataset[idx]
     return sample
-
-def get_skeleton_king_sample(config):
-    """Load dataset and find a sample where the ground truth is skeleton king."""
-    parquet_paths = ["./new_arena_placement.parquet"]
-    dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
-    
-    target_card_name = "skeleton_king"
-    if target_card_name not in CARD_TO_ID:
-        raise ValueError(f"Card {target_card_name} not found in card list.")
-    
-    target_card_id = CARD_TO_ID[target_card_name]
-    print(f"Searching for sample with card: {target_card_name} (ID: {target_card_id})")
-    
-    indices = list(range(len(dataset)))
-    np.random.shuffle(indices)
-    
-    for idx in indices:
-        sample = dataset[idx]
-        if sample["label_card"].item() == target_card_id and sample["label_action"].item() == 1:
-            print(f"Found matching sample at index {idx}")
-            return sample
-            
-    raise ValueError(f"No sample found for card: {target_card_name}")
 
 def run_inference(model, sample, device):
     """Run model inference on a single sample."""
@@ -264,11 +242,15 @@ def visualize_full_output(sample, outputs, config):
     plt.show()
 
 def main():
+    parser = argparse.ArgumentParser(description="Run inference on a Clash Royale sample and visualize outputs.")
+    parser.add_argument("checkpoint_path", type=str, help="Path to the model weights file")
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Load model
-    checkpoint_path = "./checkpoints/best_model.pt"
+    checkpoint_path = args.checkpoint_path
     print(f"Loading model from {checkpoint_path}...")
     model = load_model(checkpoint_path, config, device)
     print("Model loaded successfully.")

@@ -46,8 +46,8 @@ SPELL_CARDS = {
 
 # Grid discretization parameters (pixel to tile conversion)
 # These define the playable area within the image
-IMAGE_WIDTH = 432
-IMAGE_HEIGHT = 680
+IMAGE_WIDTH = 428
+IMAGE_HEIGHT = 683
 Y_OFFSET_TOP = 62
 Y_OFFSET_BOTTOM = 7
 X_OFFSET_LEFT = 0
@@ -62,12 +62,13 @@ TILE_WIDTH = GRID_WIDTH / NUM_COLS
 TILE_HEIGHT = GRID_HEIGHT / NUM_ROWS
 
 class ClashRoyaleDataset(Dataset):
-    def __init__(self, files, grid_w, grid_h, num_cards):
+    def __init__(self, files, grid_w, grid_h, num_cards, single_frame=False):
         super().__init__()
         self.files = list(files)
         self.grid_w = grid_w
         self.grid_h = grid_h
         self.num_cards = num_cards
+        self.single_frame = single_frame
 
         if not self.files:
             raise ValueError("No parquet files provided to ClashRoyaleDataset")
@@ -119,6 +120,14 @@ class ClashRoyaleDataset(Dataset):
             bad_rows = pc.and_(is_played, bad_pos)
             is_good_row = pc.invert(bad_rows).to_numpy(zero_copy_only=False)
             valid_mask &= is_good_row
+
+            # Filter out cards played above the middle line (opponent side)
+            # We only want to learn from cards played on our side (bottom half)
+            middle_y = Y_OFFSET_TOP + (GRID_HEIGHT / 2)
+            is_not_played = pc.equal(c_col, "None")
+            is_below_middle = pc.greater(y_col, middle_y)
+            keep_middle_filter = pc.or_(is_not_played, is_below_middle).to_numpy(zero_copy_only=False)
+            valid_mask &= keep_middle_filter
             
             # 4. Filter out samples with invalid hand data
             if "hand" in table.column_names:
@@ -211,7 +220,11 @@ class ClashRoyaleDataset(Dataset):
         # (H, W, C) -> (C, H, W)
         if t.ndim == 3 and t.shape[-1] in (1, 3):
             t = t.permute(2, 0, 1)
-        frames = t.unsqueeze(0) # (1, C, H, W)
+        
+        if self.single_frame:
+            frames = t
+        else:
+            frames = t.unsqueeze(0) # (1, C, H, W)
 
         frames = frames / 255.0
 
@@ -299,12 +312,18 @@ class ClashRoyaleDataset(Dataset):
         label_card = torch.tensor(card_id, dtype=torch.long)
         label_placement = torch.tensor(tile_index, dtype=torch.long)
 
-        return {
-            "frames": frames,
-            "playable_mask": playable_mask,
-            "hand_mask": hand_mask,
+        result = {
             "numeric_features": numeric_features,
             "label_action": label_action,
             "label_card": label_card,
             "label_placement": label_placement,
+            "playable_mask": playable_mask,
+            "hand_mask": hand_mask,
         }
+
+        if self.single_frame:
+            result["frame"] = frames
+        else:
+            result["frames"] = frames
+            
+        return result

@@ -3,37 +3,95 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
-from huggingface_hub import list_repo_files, hf_hub_download
 from sklearn.metrics import precision_score, recall_score, f1_score
 import wandb
 
-from model import ConvLSTMClashRoyaleModel
+from conv_lstm_model import ConvLSTMClashRoyaleModel
+from cnn_model import CNNClashRoyaleModel
 from dataset import ClashRoyaleDataset, ALL_CARDS
 
-# def get_hf_parquet_local_paths(repo_id: str, repo_type: str = "dataset"):
-#     """List all .parquet files in a Hugging Face repo and download them locally.
+def compute_expected_euclidean_distance(placement_logits, labels_placement, grid_h, grid_w):
+    """
+    Computes the expected Euclidean distance between the predicted placement distribution
+    and the ground truth target tile.
+    
+    Args:
+        placement_logits: (B, grid_cells) - logits for the correct card
+        labels_placement: (B,) - target tile indices
+        grid_h, grid_w: grid dimensions
+        
+    Returns:
+        mean_expected_dist: scalar tensor
+    """
+    B, grid_cells = placement_logits.shape
+    device = placement_logits.device
+    
+    # Probabilities
+    probs = torch.softmax(placement_logits, dim=1) # (B, grid_cells)
+    
+    # Grid coordinates
+    # Create meshgrid
+    y_coords = torch.arange(grid_h, device=device).repeat_interleave(grid_w)
+    x_coords = torch.arange(grid_w, device=device).repeat(grid_h)
+    grid_coords = torch.stack([x_coords, y_coords], dim=1).float() # (grid_cells, 2)
+    
+    # Target coordinates
+    target_y = labels_placement // grid_w
+    target_x = labels_placement % grid_w
+    target_coords = torch.stack([target_x, target_y], dim=1).float() # (B, 2)
+    
+    # Compute distances: (B, grid_cells)
+    # Expand dims for broadcasting
+    # grid_coords: (1, grid_cells, 2)
+    # target_coords: (B, 1, 2)
+    dists = torch.norm(grid_coords.unsqueeze(0) - target_coords.unsqueeze(1), dim=2) # (B, grid_cells)
+    
+    # Expected distance
+    expected_dist = torch.sum(probs * dists, dim=1) # (B,)
+    
+    return expected_dist.mean()
 
-#     Returns a list of local cached file paths suitable for ParquetClashDataset.
-#     """
-#     files = list_repo_files(repo_id, repo_type=repo_type)
-#     parquet_files = [f for f in files if f.endswith(".parquet")]
-#     if not parquet_files:
-#         raise ValueError(f"No .parquet files found in HF repo: {repo_id}")
 
-#     local_paths = []
-#     for fp in parquet_files:
-#         local_path = hf_hub_download(repo_id=repo_id, filename=fp, repo_type=repo_type)
-#         local_paths.append(local_path)
-#     return local_paths
+def compute_argmax_euclidean_distance(placement_logits, labels_placement, grid_h, grid_w):
+    """
+    Computes the Euclidean distance between the argmax predicted placement
+    and the ground truth target tile.
+    
+    Args:
+        placement_logits: (B, grid_cells) - logits for the correct card
+        labels_placement: (B,) - target tile indices
+        grid_h, grid_w: grid dimensions
+        
+    Returns:
+        mean_dist: scalar tensor
+    """
+    B = placement_logits.shape[0]
+    device = placement_logits.device
+    
+    # Get predicted tile indices
+    pred_tiles = torch.argmax(placement_logits, dim=1) # (B,)
+    
+    # Convert to coordinates
+    pred_y = pred_tiles // grid_w
+    pred_x = pred_tiles % grid_w
+    pred_coords = torch.stack([pred_x, pred_y], dim=1).float() # (B, 2)
+    
+    # Target coordinates
+    target_y = labels_placement // grid_w
+    target_x = labels_placement % grid_w
+    target_coords = torch.stack([target_x, target_y], dim=1).float() # (B, 2)
+    
+    # Compute distances
+    dists = torch.norm(pred_coords - target_coords, dim=1) # (B,)
+    
+    return dists.mean()
 
 
 def build_dataloaders(config, device):
-    # hf_repo_id = config["hf_repo_id"]
-    # hf_repo_type = config.get("hf_repo_type", "dataset")
-    # parquet_paths = get_hf_parquet_local_paths(hf_repo_id, repo_type=hf_repo_type)
-
     parquet_paths = ["placement_27_28_29.parquet", "./Nones_27_28_29.parquet"]
-    dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"])
+    
+    use_lstm = config.get("use_lstm", True)
+    dataset = ClashRoyaleDataset(parquet_paths, config["grid_w"], config["grid_h"], config["num_cards"], single_frame=not use_lstm)
 
     val_ratio = config.get("val_ratio", 0.1)
     test_ratio = config.get("test_ratio", 0.1)
@@ -43,7 +101,10 @@ def build_dataloaders(config, device):
     n_val = int(n_total * val_ratio)
     n_test = int(n_total * test_ratio)
     n_train = n_total - n_val - n_test
-    train_dataset, val_dataset, test_dataset = random_split(dataset, [n_train, n_val, n_test])
+    
+    seed = config.get("seed", 42)
+    generator = torch.Generator().manual_seed(seed)
+    train_dataset, val_dataset, test_dataset = random_split(dataset, [n_train, n_val, n_test], generator=generator)
 
     print(f"Dataset sizes -> total: {n_total}, train: {n_train}, val: {n_val}, test: {n_test}")
 
@@ -107,19 +168,29 @@ def build_model(config, device):
 
         pretrained_weights = MobileNet_V2_Weights.DEFAULT
 
-    model = ConvLSTMClashRoyaleModel(
-        num_cards=num_cards,
-        numeric_feat_dim=numeric_feat_dim,
-        grid_h=grid_h,
-        grid_w=grid_w,
-        convlstm_hidden=convlstm_hidden,
-        pretrained_backbone_weights=pretrained_weights,
-        backbone_proj_channels=backbone_proj_channels,
-        use_transformer=config.get("use_transformer", False),
-        transformer_layers=config.get("transformer_layers", 2),
-        transformer_heads=config.get("transformer_heads", 4),
-        transformer_dropout=config.get("transformer_dropout", 0.1),
-    )
+    if config.get("use_lstm", True):
+        model = ConvLSTMClashRoyaleModel(
+            num_cards=num_cards,
+            numeric_feat_dim=numeric_feat_dim,
+            grid_h=grid_h,
+            grid_w=grid_w,
+            convlstm_hidden=convlstm_hidden,
+            pretrained_backbone_weights=pretrained_weights,
+            backbone_proj_channels=backbone_proj_channels,
+            use_transformer=config.get("use_transformer", False),
+            transformer_layers=config.get("transformer_layers", 2),
+            transformer_heads=config.get("transformer_heads", 4),
+            transformer_dropout=config.get("transformer_dropout", 0.1),
+        )
+    else:
+        model = CNNClashRoyaleModel(
+            num_cards=num_cards,
+            numeric_feat_dim=numeric_feat_dim,
+            grid_h=grid_h,
+            grid_w=grid_w,
+            backbone_weights=pretrained_weights,
+            backbone_proj_channels=backbone_proj_channels,
+        )
     return model.to(device)
 
 
@@ -160,7 +231,12 @@ def train_one_epoch(model, train_loader, optimizer, action_loss_fn, card_loss_fn
 
     for batch_idx, batch in enumerate(train_loader):
         # Use non_blocking=True to overlap CPU->GPU transfer with computation
-        frames = batch["frames"].to(device, non_blocking=True)
+        use_lstm = config.get("use_lstm", True)
+        if use_lstm:
+            frames = batch["frames"].to(device, non_blocking=True)
+        else:
+            frames = batch["frame"].to(device, non_blocking=True)
+            
         numeric_features = batch["numeric_features"].to(device, non_blocking=True)
         labels_action = batch["label_action"].long().to(device, non_blocking=True)
         labels_card = batch["label_card"].long().to(device, non_blocking=True)
@@ -169,12 +245,13 @@ def train_one_epoch(model, train_loader, optimizer, action_loss_fn, card_loss_fn
         playable_mask = batch["playable_mask"].to(device, non_blocking=True)
         hand_mask = batch["hand_mask"].to(device, non_blocking=True)
 
-        if frames.ndim == 4:
-            frames = frames.unsqueeze(1)
+        if use_lstm:
+            if frames.ndim == 4:
+                frames = frames.unsqueeze(1)
 
-        T = frames.shape[1]
-        use_T = min(frames_per_sample, T)
-        frames = frames[:, -use_T:, ...]
+            T = frames.shape[1]
+            use_T = min(frames_per_sample, T)
+            frames = frames[:, -use_T:, ...]
 
         optimizer.zero_grad(set_to_none=True)
         
@@ -287,6 +364,8 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
     total_action_loss = 0.0
     total_card_loss = 0.0
     total_place_loss = 0.0
+    total_eed = 0.0
+    total_aed = 0.0
     total_batches = 0
     total_action_batches = 0  # Batches with action=1 samples
     
@@ -301,7 +380,12 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
     with torch.no_grad():
         for batch in data_loader:
             # Use non_blocking=True to overlap CPU->GPU transfer with computation
-            frames = batch["frames"].to(device, non_blocking=True)
+            use_lstm = config.get("use_lstm", True)
+            if use_lstm:
+                frames = batch["frames"].to(device, non_blocking=True)
+            else:
+                frames = batch["frame"].to(device, non_blocking=True)
+
             numeric_features = batch["numeric_features"].to(device, non_blocking=True)
             labels_action = batch["label_action"].long().to(device, non_blocking=True)
             labels_card = batch["label_card"].long().to(device, non_blocking=True)
@@ -310,12 +394,13 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
             playable_mask = batch["playable_mask"].to(device, non_blocking=True)
             hand_mask = batch["hand_mask"].to(device, non_blocking=True)
 
-            if frames.ndim == 4:
-                frames = frames.unsqueeze(1)
+            if use_lstm:
+                if frames.ndim == 4:
+                    frames = frames.unsqueeze(1)
 
-            T = frames.shape[1]
-            use_T = min(frames_per_sample, T)
-            frames = frames[:, -use_T:, ...]
+                T = frames.shape[1]
+                use_T = min(frames_per_sample, T)
+                frames = frames[:, -use_T:, ...]
 
             outputs = model(frames, numeric_features, playable_mask, hand_mask)
             action_logits = outputs["action_logits"]  # (B, 1)
@@ -343,8 +428,26 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
                 ]
                 place_loss = place_loss_fn(relevant_placement_logits, labels_placement_masked)
                 
+                # Compute Expected Euclidean Distance
+                eed = compute_expected_euclidean_distance(
+                    relevant_placement_logits, 
+                    labels_placement_masked, 
+                    config["grid_h"], 
+                    config["grid_w"]
+                )
+
+                # Compute Argmax Euclidean Distance
+                aed = compute_argmax_euclidean_distance(
+                    relevant_placement_logits, 
+                    labels_placement_masked, 
+                    config["grid_h"], 
+                    config["grid_w"]
+                )
+                
                 total_card_loss += card_loss.item()
                 total_place_loss += place_loss.item()
+                total_eed += eed.item()
+                total_aed += aed.item()
                 total_action_batches += 1
                 
                 loss = action_loss + card_loss + place_loss
@@ -368,6 +471,9 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
     avg_action = total_action_loss / max(total_batches, 1)
     avg_card = total_card_loss / max(total_action_batches, 1) if total_action_batches > 0 else 0.0
     avg_place = total_place_loss / max(total_action_batches, 1) if total_action_batches > 0 else 0.0
+
+    avg_eed = total_eed / max(total_action_batches, 1) if total_action_batches > 0 else 0.0
+    avg_aed = total_aed / max(total_action_batches, 1) if total_action_batches > 0 else 0.0
 
     # Action metrics: binary classification (play vs no-play)
     action_precision = precision_score(all_action_labels, all_action_preds, pos_label=1, zero_division=0)
@@ -400,6 +506,10 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
         f"[Eval] {split_name} epoch {epoch + 1} (card head): "
         f"accuracy={card_accuracy:.4f}, precision={card_precision:.4f}, recall={card_recall:.4f}, f1={card_f1:.4f}"
     )
+    print(
+        f"[Eval] {split_name} epoch {epoch + 1} (place head): "
+        f"eed={avg_eed:.4f}, aed={avg_aed:.4f}"
+    )
 
     wandb.log(
         {
@@ -415,6 +525,8 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
             f"{split_name}/card_precision": card_precision,
             f"{split_name}/card_recall": card_recall,
             f"{split_name}/card_f1": card_f1,
+            f"{split_name}/place_eed": avg_eed,
+            f"{split_name}/place_aed": avg_aed,
         }
     )
 
@@ -451,35 +563,10 @@ def run_training(game_config, hyperparameter_config, runtime_config):
         action_loss_fn = nn.BCEWithLogitsLoss(pos_weight=action_pos_weight)  # Balanced binary loss
         card_loss_fn = nn.CrossEntropyLoss()     # Multi-class: which card
         place_loss_fn = nn.CrossEntropyLoss()    # Placement on grid
-
-        # Separate parameters into groups
-        backbone_params = list(model.backbone.parameters()) + list(model.convlstm.parameters())
-        
-        # Include transformer params if present
-        if hasattr(model, 'transformer') and model.use_transformer:
-            backbone_params += list(model.transformer.parameters())
-            backbone_params += list(model.pos_encoding.parameters())
-        
-        action_params = list(model.action_head_mlp.parameters())
-        card_params = list(model.card_head_mlp.parameters())
-        
-        # Placement head consists of multiple components
-        place_params = (
-            list(model.place_reduce_conv.parameters()) + 
-            list(model.place_conv_block.parameters()) + 
-            list(model.place_logits.parameters())
-        )
-
-        base_lr = config["learning_rate"]
         
         optimizer = optim.AdamW(
-            [
-                {"params": backbone_params, "lr": config.get("lr_backbone", base_lr)},
-                {"params": action_params, "lr": config.get("lr_action", base_lr)},
-                {"params": card_params, "lr": config.get("lr_card", base_lr)},
-                {"params": place_params, "lr": config.get("lr_place", base_lr)},
-            ],
-            lr=base_lr,
+            params=model.parameters(),
+            lr=config["learning_rate"],
             weight_decay=config.get("weight_decay", 0.0),
         )
 
@@ -547,6 +634,14 @@ def run_training(game_config, hyperparameter_config, runtime_config):
                     break
 
         # final test evaluation
+        best_model_path = os.path.join(config.get("output_dir", "./checkpoints"), "best_model.pt")
+        if os.path.exists(best_model_path):
+            print(f"Loading best model from {best_model_path}...")
+            checkpoint = torch.load(best_model_path, map_location=device)
+            model.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            print("Warning: Best model not found. Using current model state.")
+
         test_loss = evaluate(
             model,
             test_loader,
@@ -561,7 +656,6 @@ def run_training(game_config, hyperparameter_config, runtime_config):
 
 
 if __name__ == "__main__":
-    # hyperparameters tracked by wandb
     game_config = {
         "num_cards": len(ALL_CARDS),
         "grid_h": 32,
@@ -569,36 +663,31 @@ if __name__ == "__main__":
         "numeric_feat_dim": 1,
     }
     
+    # hyperparameters tracked by wandb
     hyperparameter_config = {
+        "use_lstm": True,
         "batch_size": 16,
         "num_epochs": 10,
         "learning_rate": 6e-4,
         "weight_decay": 1e-2,
         "use_scheduler": True,
         "max_grad_norm": 1.0,
-        "frames_per_sample": 1,
-        "convlstm_hidden": 64,
         "backbone_proj_channels": 64,
         "backbone_pretrained": True,
         "early_stopping_patience": 5,
 
-        # Transformer parameters
+        # LSTM-only parameters
+        "frames_per_sample": 1,
+        "convlstm_hidden": 64,
         "use_transformer": True,
         "transformer_layers": 2,
         "transformer_heads": 4,
         "transformer_dropout": 0.1,
-        
-        # Component-specific learning rates
-        # "lr_backbone": 6e-4,
-        # "lr_action": 6e-4,
-        # "lr_card": 6e-4,
-        # "lr_place": 6e-4,
     }
 
     # runtime-only parameters (not tracked by wandb)
     runtime_config = {
-        "hf_repo_id": "your-username/your-parquet-repo",
-        "hf_repo_type": "dataset",
+        "seed": 42,
         "val_ratio": 0.1,
         "test_ratio": 0.1,
         "log_every": 10,
