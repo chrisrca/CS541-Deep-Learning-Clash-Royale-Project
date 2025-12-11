@@ -59,6 +59,11 @@ for row in range(NUM_ROWS + 1):
     y = Y_OFFSET_TOP + row * TILE_HEIGHT
     draw.line([(x_start, y), (x_end, y)], fill="red", width=1)
 
+# Draw middle line
+middle_y = Y_OFFSET_TOP + (grid_height / 2)
+print(f"Middle Y Position: {middle_y}")
+draw.line([(0, middle_y), (width, middle_y)], fill="blue", width=2)
+
 print(f"\n=== GRID PARAMETERS ===")
 print(f"Offsets: left={X_OFFSET_LEFT}, right={X_OFFSET_RIGHT}, top={Y_OFFSET_TOP}, bottom={Y_OFFSET_BOTTOM}")
 print(f"Grid: {NUM_COLS} columns x {NUM_ROWS} rows")

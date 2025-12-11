@@ -120,6 +120,14 @@ class ClashRoyaleDataset(Dataset):
             bad_rows = pc.and_(is_played, bad_pos)
             is_good_row = pc.invert(bad_rows).to_numpy(zero_copy_only=False)
             valid_mask &= is_good_row
+
+            # Filter out cards played above the middle line (opponent side)
+            # We only want to learn from cards played on our side (bottom half)
+            middle_y = Y_OFFSET_TOP + (GRID_HEIGHT / 2)
+            is_not_played = pc.equal(c_col, "None")
+            is_below_middle = pc.greater(y_col, middle_y)
+            keep_middle_filter = pc.or_(is_not_played, is_below_middle).to_numpy(zero_copy_only=False)
+            valid_mask &= keep_middle_filter
             
             # 4. Filter out samples with invalid hand data
             if "hand" in table.column_names:

@@ -665,7 +665,7 @@ if __name__ == "__main__":
     
     # hyperparameters tracked by wandb
     hyperparameter_config = {
-        "use_lstm": False,
+        "use_lstm": True,
         "batch_size": 16,
         "num_epochs": 10,
         "learning_rate": 6e-4,
