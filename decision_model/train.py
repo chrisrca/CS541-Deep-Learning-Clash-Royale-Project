@@ -27,6 +27,83 @@ from dataset import ClashRoyaleDataset, ALL_CARDS
 #     return local_paths
 
 
+def compute_expected_euclidean_distance(placement_logits, labels_placement, grid_h, grid_w):
+    """
+    Computes the expected Euclidean distance between the predicted placement distribution
+    and the ground truth target tile.
+    
+    Args:
+        placement_logits: (B, grid_cells) - logits for the correct card
+        labels_placement: (B,) - target tile indices
+        grid_h, grid_w: grid dimensions
+        
+    Returns:
+        mean_expected_dist: scalar tensor
+    """
+    B, grid_cells = placement_logits.shape
+    device = placement_logits.device
+    
+    # Probabilities
+    probs = torch.softmax(placement_logits, dim=1) # (B, grid_cells)
+    
+    # Grid coordinates
+    # Create meshgrid
+    y_coords = torch.arange(grid_h, device=device).repeat_interleave(grid_w)
+    x_coords = torch.arange(grid_w, device=device).repeat(grid_h)
+    grid_coords = torch.stack([x_coords, y_coords], dim=1).float() # (grid_cells, 2)
+    
+    # Target coordinates
+    target_y = labels_placement // grid_w
+    target_x = labels_placement % grid_w
+    target_coords = torch.stack([target_x, target_y], dim=1).float() # (B, 2)
+    
+    # Compute distances: (B, grid_cells)
+    # Expand dims for broadcasting
+    # grid_coords: (1, grid_cells, 2)
+    # target_coords: (B, 1, 2)
+    dists = torch.norm(grid_coords.unsqueeze(0) - target_coords.unsqueeze(1), dim=2) # (B, grid_cells)
+    
+    # Expected distance
+    expected_dist = torch.sum(probs * dists, dim=1) # (B,)
+    
+    return expected_dist.mean()
+
+
+def compute_argmax_euclidean_distance(placement_logits, labels_placement, grid_h, grid_w):
+    """
+    Computes the Euclidean distance between the argmax predicted placement
+    and the ground truth target tile.
+    
+    Args:
+        placement_logits: (B, grid_cells) - logits for the correct card
+        labels_placement: (B,) - target tile indices
+        grid_h, grid_w: grid dimensions
+        
+    Returns:
+        mean_dist: scalar tensor
+    """
+    B = placement_logits.shape[0]
+    device = placement_logits.device
+    
+    # Get predicted tile indices
+    pred_tiles = torch.argmax(placement_logits, dim=1) # (B,)
+    
+    # Convert to coordinates
+    pred_y = pred_tiles // grid_w
+    pred_x = pred_tiles % grid_w
+    pred_coords = torch.stack([pred_x, pred_y], dim=1).float() # (B, 2)
+    
+    # Target coordinates
+    target_y = labels_placement // grid_w
+    target_x = labels_placement % grid_w
+    target_coords = torch.stack([target_x, target_y], dim=1).float() # (B, 2)
+    
+    # Compute distances
+    dists = torch.norm(pred_coords - target_coords, dim=1) # (B,)
+    
+    return dists.mean()
+
+
 def build_dataloaders(config, device):
     # hf_repo_id = config["hf_repo_id"]
     # hf_repo_type = config.get("hf_repo_type", "dataset")
@@ -287,6 +364,8 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
     total_action_loss = 0.0
     total_card_loss = 0.0
     total_place_loss = 0.0
+    total_eed = 0.0
+    total_aed = 0.0
     total_batches = 0
     total_action_batches = 0  # Batches with action=1 samples
     
@@ -343,8 +422,26 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
                 ]
                 place_loss = place_loss_fn(relevant_placement_logits, labels_placement_masked)
                 
+                # Compute Expected Euclidean Distance
+                eed = compute_expected_euclidean_distance(
+                    relevant_placement_logits, 
+                    labels_placement_masked, 
+                    config["grid_h"], 
+                    config["grid_w"]
+                )
+
+                # Compute Argmax Euclidean Distance
+                aed = compute_argmax_euclidean_distance(
+                    relevant_placement_logits, 
+                    labels_placement_masked, 
+                    config["grid_h"], 
+                    config["grid_w"]
+                )
+                
                 total_card_loss += card_loss.item()
                 total_place_loss += place_loss.item()
+                total_eed += eed.item()
+                total_aed += aed.item()
                 total_action_batches += 1
                 
                 loss = action_loss + card_loss + place_loss
@@ -368,6 +465,9 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
     avg_action = total_action_loss / max(total_batches, 1)
     avg_card = total_card_loss / max(total_action_batches, 1) if total_action_batches > 0 else 0.0
     avg_place = total_place_loss / max(total_action_batches, 1) if total_action_batches > 0 else 0.0
+    
+    avg_eed = total_eed / max(total_action_batches, 1) if total_action_batches > 0 else 0.0
+    avg_aed = total_aed / max(total_action_batches, 1) if total_action_batches > 0 else 0.0
 
     # Action metrics: binary classification (play vs no-play)
     action_precision = precision_score(all_action_labels, all_action_preds, pos_label=1, zero_division=0)
@@ -400,6 +500,10 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
         f"[Eval] {split_name} epoch {epoch + 1} (card head): "
         f"accuracy={card_accuracy:.4f}, precision={card_precision:.4f}, recall={card_recall:.4f}, f1={card_f1:.4f}"
     )
+    print(
+        f"[Eval] {split_name} epoch {epoch + 1} (place head): "
+        f"eed={avg_eed:.4f}, aed={avg_aed:.4f}"
+    )
 
     wandb.log(
         {
@@ -415,6 +519,8 @@ def evaluate(model, data_loader, action_loss_fn, card_loss_fn, place_loss_fn, de
             f"{split_name}/card_precision": card_precision,
             f"{split_name}/card_recall": card_recall,
             f"{split_name}/card_f1": card_f1,
+            f"{split_name}/place_eed": avg_eed,
+            f"{split_name}/place_aed": avg_aed,
         }
     )
 
