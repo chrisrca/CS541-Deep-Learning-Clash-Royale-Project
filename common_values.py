@@ -8,6 +8,7 @@ MENU_TARGET_COLOR = np.array([16, 187, 248], dtype=np.float32) # BGR
 HAMBURGER_MENU = (495, 105)
 TV_ROYALE_BUTTON = (390, 210)
 TRAINING_CAMP_BUTTON = (390, 300)
+LADDER_MATCH_BUTTON = (280, 750)
 
 TV_ROYALE_LEFT = (46, 166)
 TV_ROYALE_RIGHT = (495, 167)
@@ -28,6 +29,8 @@ TV_ROYALE_BANNER_COLOR_REGION = [slice(150, 185), slice(90, 100)]
 TV_ROYALE_BANNER_COLOR = np.array([99, 26, 232], dtype=np.float32)
 
 MENU_OK_BUTTON = (370, 550)
+BOTTOM_OK_BUTTON = (270, 935)
+PLAY_AGAIN_BUTTON = (185, 874)
 
 BATTLE_REGION = [slice(953, 957), slice(205, 525)]
 BATTLE_TARGET_COLOR = np.array([137, 67, 6], dtype=np.float32)
@@ -41,7 +44,7 @@ ALL_CARDS = [
     "archer_queen", "archers", "arrows", "baby_dragon", "balloon", "bandit", "barb_barrel", "barb_hut", "barbs", 
     "bats", "battle_ram", "berserker", "bomb_tower", "bomber", "boss_bandit", "bowler", "bush_goblin", 
     "caged_goblin", "cannon", "cannon_cart", "clone", "dark_prince", "dart_goblin", "e_barbs", "e_wiz", 
-    "earthquake", "electro_dragon", "electro_giant", "electro_spirit", "elixir_golem", "elixir_pump", "empty", 
+    "earthquake", "electro_dragon", "electro_giant", "electro_spirit", "elixir_golem", "elixir_pump", 
     "evo_archers", "evo_baby_dragon", "evo_barbs", "evo_bats", "evo_battle_ram", "evo_bomber", "evo_cannon", "evo_dart_goblin",
     "evo_electro_dragon", "evo_executioner", "evo_firecracker", "evo_furnace", "evo_ghost", "evo_goblin_barrel", "evo_goblin_cage", 
     "evo_goblin_drill", "evo_goblin_giant", "evo_hunter", "evo_ice_spirit", "evo_inferno_dragon", "evo_knight", "evo_lumberjack", "evo_mega_knight", "evo_mortar", 

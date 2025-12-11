@@ -29,13 +29,15 @@ class ClashBot():
         # Track previous line length
         self.prev_len = 0
         self.delay = 10
-        self.temperature = 0.7
+        self.temperature = 0.3
 
         model = ConvLSTMClashRoyaleModel(
             num_cards=len(ALL_CARDS),
             numeric_feat_dim=1,
             grid_h=32,
             grid_w=18,
+            convlstm_hidden=64,
+            backbone_proj_channels=64,
         )
 
         weights = torch.load("decision_model/checkpoints/best_model_bottom_only.pt", map_location=torch.device('cpu'))
@@ -47,22 +49,16 @@ class ClashBot():
 
     def run(self, serial):
         self.open_clash_royale(serial)
+        if not self.wait_for_menu(serial):
+            exit(1)
         while True:       
-            # Loop starts on main menu  
-            if not self.wait_for_menu(serial):
-                self.open_clash_royale(serial)
-                if not self.wait_for_menu(serial):
-                    print(f"[{serial}] Menu unreachable - retrying in 60s")
-                    time.sleep(60)
-                    continue
-   
             # Start a match
-            self.open_training_camp(serial)
+            self.open_ladder_match(serial)
             self.wait_for_match(serial)
             # Play match until complete
             self.play(serial)
-            break
-            
+            time.sleep(7)
+            self.end_match(serial)
 
             
     def play(self, serial):
@@ -177,18 +173,20 @@ class ClashBot():
     def wait_for_menu(self, serial: str, timeout=60):
         start_time = time.time()
         while time.time() - start_time < timeout:
-            frame = self.mumu.get_screen(serial)
-            if frame is None:
-                time.sleep(0.1)
-                continue
-            roi = frame[*MENU_CHECK_REGION]
-            mean = np.mean(roi, axis=(0, 1)).astype(np.float32)
-            if np.all(np.abs(mean - MENU_TARGET_COLOR) <= 10):
+            if self.in_menu(serial):
                 print(f"[{serial}] Detected Menu Screen")
                 return True
             time.sleep(0.1)
         print(f"[{serial}] MENU TIMEOUT ({timeout}s)")
         return False
+
+    def in_menu(self, serial):
+        frame = self.mumu.get_screen(serial)
+        if frame is None:
+            return False
+        roi = frame[*MENU_CHECK_REGION]
+        mean = np.mean(roi, axis=(0, 1)).astype(np.float32)
+        return np.all(np.abs(mean - MENU_TARGET_COLOR) <= 10)
 
     def open_training_camp(self, serial: str):
         print(f"[{serial}] Opening Training Camp")
@@ -198,6 +196,16 @@ class ClashBot():
         time.sleep(1)
         self.mumu.tap(serial, *MENU_OK_BUTTON)
     
+    def open_ladder_match(self, serial):
+        print(f"[{serial}] Opening Ladder Match")
+        self.mumu.tap(serial, *LADDER_MATCH_BUTTON)
+
+    def end_match(self, serial):
+        print(f"[{serial}] Ending Match")
+        self.mumu.tap(serial, *PLAY_AGAIN_BUTTON)
+        time.sleep(2)
+
+
     def wait_for_match(self, serial, timeout=10):
         start_time = time.time()
         while time.time() - start_time < timeout:
