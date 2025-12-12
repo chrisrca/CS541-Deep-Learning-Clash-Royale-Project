@@ -1,5 +1,5 @@
 """
-Spatial Attention-based Card + Placement model for Clash Royale-style gameplay.
+CNN-based Card + Placement model for Clash Royale-style gameplay.
 Single-frame input, no LSTM.
 
 Requirements:
@@ -7,7 +7,6 @@ Requirements:
 
 Model summary:
     - Backbone: MobileNetV2 for efficient feature extraction
-    - Spatial Attention: Transformer Encoder over flattened spatial features
     - Input:
         frames: (B, C, H, W) float tensor, normalized (single frame)
         numeric_feats: (B, numeric_feat_dim) float tensor
@@ -95,10 +94,7 @@ class CNNClashRoyaleModel(nn.Module):
         self.backbone = MobileNetV2Backbone(weights=backbone_weights, proj_out_channels=backbone_proj_channels)
         self.feature_dim = self.backbone.out_channels
 
-        # 2. Spatial Attention REMOVED
-        # We now use the backbone features directly.
-
-        # 3. Heads
+        # 2. Heads
         # Shared feature dimension for dense heads
         # We concatenate Global Pooled Features + Numeric + Hand
         shared_feat_dim = self.feature_dim + numeric_feat_dim + num_cards
@@ -157,20 +153,16 @@ class CNNClashRoyaleModel(nn.Module):
         # (B, C, Hf, Wf)
         features = self.backbone(frames)
         
-        # 2. No Spatial Attention
-        # Use features directly
-        attended_features = features
-        
-        # 3. Global Pooling for Action/Card heads
+        # 2. Global Pooling for Action/Card heads
         # (B, C)
-        pooled_features = F.adaptive_avg_pool2d(attended_features, output_size=(1, 1)).view(B, -1)
+        pooled_features = F.adaptive_avg_pool2d(features, output_size=(1, 1)).view(B, -1)
         
-        # 4. Prepare Shared Features
+        # 3. Prepare Shared Features
         # Concat: [Pooled Features, Numeric Features, Hand Mask]
         # Note: hand_mask is used as a feature here, similar to original model
         combined_features = torch.cat([pooled_features, numeric_feats, hand_mask], dim=1)
         
-        # 5. Action & Card Heads
+        # 4. Action & Card Heads
         action_logits = self.action_head_mlp(combined_features) # (B, 1)
         card_logits = self.card_head_mlp(combined_features)     # (B, num_cards)
         
@@ -183,9 +175,9 @@ class CNNClashRoyaleModel(nn.Module):
             mask_penalty = (1.0 - playable_mask) * -1e9
             card_logits = card_logits + mask_penalty
 
-        # 6. Placement Head
-        # Use attended_features (B, C, Hf, Wf)
-        x_place = self.place_reduce_conv(attended_features) # (B, mid_ch, Hf, Wf)
+        # 5. Placement Head
+        # Use features (B, C, Hf, Wf)
+        x_place = self.place_reduce_conv(features) # (B, mid_ch, Hf, Wf)
         
         # Broadcast numeric features to spatial grid
         # numeric_feats: (B, num_feat) -> (B, num_feat, 1, 1) -> (B, num_feat, Hf, Wf)
